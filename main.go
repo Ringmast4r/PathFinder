@@ -26,8 +26,8 @@ import (
 )
 
 const (
-	Version            = "3.0.0"
-	UserAgent          = "PathFinder/3.0 (Security Research)"
+	Version            = "1.0.1"
+	UserAgent          = "PathFinder/1.0 (Security Research)"
 	DefaultConcurrency = 50
 	DefaultTimeout     = 10
 	MinRedirectCount   = 3
@@ -119,15 +119,15 @@ var (
 
 	ThemeDark = Theme{
 		Name:       "DARK",
-		Background: tcell.NewRGBColor(255, 255, 255),
-		Text:       tcell.NewRGBColor(0, 0, 0),
-		Primary:    tcell.NewRGBColor(30, 70, 170),
-		Success:    tcell.NewRGBColor(0, 120, 30),
-		Warning:    tcell.NewRGBColor(180, 100, 0),
-		Danger:     tcell.NewRGBColor(180, 20, 20),
-		Info:       tcell.NewRGBColor(0, 90, 150),
-		Border:     tcell.NewRGBColor(100, 100, 110),
-		Globe:      tcell.NewRGBColor(30, 70, 170),
+		Background: tcell.ColorBlack,
+		Text:       tcell.NewRGBColor(200, 200, 200),
+		Primary:    tcell.NewRGBColor(100, 150, 255),
+		Success:    tcell.NewRGBColor(100, 200, 150),
+		Warning:    tcell.NewRGBColor(255, 200, 100),
+		Danger:     tcell.NewRGBColor(255, 100, 100),
+		Info:       tcell.NewRGBColor(150, 180, 255),
+		Border:     tcell.NewRGBColor(120, 120, 150),
+		Globe:      tcell.NewRGBColor(100, 150, 255),
 	}
 
 	ThemePurple = Theme{
@@ -156,7 +156,33 @@ var (
 		Globe:      tcell.NewRGBColor(255, 180, 0),
 	}
 
-	CurrentTheme = ThemeBlood
+	ThemeWhite = Theme{
+		Name:       "WHITE",
+		Background: tcell.ColorBlack,
+		Text:       tcell.ColorWhite,
+		Primary:    tcell.NewRGBColor(255, 255, 255),
+		Success:    tcell.NewRGBColor(0, 255, 0),
+		Warning:    tcell.NewRGBColor(255, 255, 0),
+		Danger:     tcell.NewRGBColor(255, 255, 255),
+		Info:       tcell.NewRGBColor(200, 200, 200),
+		Border:     tcell.NewRGBColor(180, 180, 180),
+		Globe:      tcell.NewRGBColor(255, 255, 255),
+	}
+
+	ThemeNeon = Theme{
+		Name:       "NEON",
+		Background: tcell.ColorBlack,
+		Text:       tcell.NewRGBColor(0, 255, 200),
+		Primary:    tcell.NewRGBColor(255, 0, 255),
+		Success:    tcell.NewRGBColor(0, 255, 100),
+		Warning:    tcell.NewRGBColor(255, 255, 0),
+		Danger:     tcell.NewRGBColor(255, 0, 100),
+		Info:       tcell.NewRGBColor(0, 200, 255),
+		Border:     tcell.NewRGBColor(255, 0, 200),
+		Globe:      tcell.NewRGBColor(0, 255, 255),
+	}
+
+	CurrentTheme = ThemeSkittles
 )
 
 // ===========================================================================
@@ -191,6 +217,7 @@ type LiveStats struct {
 	Protected         int64
 	CurrentSpeed      float64
 	StartTime         time.Time
+	EndTime           time.Time  // Track when scan completes
 	LastUpdate        time.Time
 }
 
@@ -245,6 +272,8 @@ type Scanner struct {
 	rateLimiter      <-chan time.Time
 	lastResults      []*ScanResult
 	resultsMutex     sync.Mutex
+	cancelScan       bool         // Flag to cancel active scan
+	cancelMutex      sync.Mutex   // Mutex for cancel flag
 }
 
 // ===========================================================================
@@ -513,6 +542,35 @@ type TUI struct {
 	configEditText      string  // Temporary text while editing
 	showHelpScreen      bool    // Whether help screen is visible
 	resultsScrollOffset int     // Scroll offset for live results
+	helpScrollOffset    int     // Scroll offset for help screen
+
+	// Pathfinding maze animation
+	mazeWidth              int
+	mazeHeight             int
+	maze                   [][]rune
+	mazeVisited            [][]bool
+	mazeStart              Point
+	mazeEnd                Point
+	mazeAnimating          bool
+	mazeComplete           bool
+	lastScanActive         bool     // Track if scan was active in previous frame
+	mazeSyncMode           bool     // Whether maze is syncing with active scan
+	lastScanCompleted      int64    // Last scan request count for delta calculation
+	lastTotalRequests      int64    // Track when new scans start (TotalRequests increases)
+	mazeAnimationSequence  []func() // Pre-calculated animation sequence
+	mazeCurrentStep        int      // Current step in animation sequence
+	mazeTotalSolutionSteps int      // Total steps in complete solution
+	scanHasEverRun         bool     // Track if any scan has ever been run
+	hideNetworkInfo        bool     // Toggle to hide local network info (for screenshots/OpSec)
+}
+
+type Point struct {
+	x, y int
+}
+
+type QueueItem struct {
+	pos  Point
+	path []Point
 }
 
 func NewTUI(scanner *Scanner) (*TUI, error) {
@@ -527,10 +585,17 @@ func NewTUI(scanner *Scanner) (*TUI, error) {
 
 	screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
 	screen.Clear()
+	screen.Show() // Force clear to display immediately
 
 	width, height := screen.Size()
 
-	return &TUI{
+	// Calculate maze dimensions to match box width above
+	titleWidth := width - 4
+	boxWidth := titleWidth/2 - 1
+	mazeWidth := boxWidth - 2  // Subtract 2 for left/right borders
+	mazeHeight := 14           // Reduced from 18 to fit better in normal CMD windows
+
+	tui := &TUI{
 		screen:         screen,
 		width:          width,
 		height:         height,
@@ -540,24 +605,67 @@ func NewTUI(scanner *Scanner) (*TUI, error) {
 		running:        true,
 		showSplash:     true,
 		splashProgress: 0.0,
-	}, nil
+		mazeWidth:      mazeWidth,
+		mazeHeight:     mazeHeight,
+	}
+
+	tui.initMaze()
+	return tui, nil
 }
 
 func (tui *TUI) drawText(x, y int, text string, style tcell.Style) {
+	// Rainbow colors for Rainbow theme
+	rainbowColors := []tcell.Color{
+		tcell.NewRGBColor(255, 0, 0),     // Red
+		tcell.NewRGBColor(255, 127, 0),   // Orange
+		tcell.NewRGBColor(255, 255, 0),   // Yellow
+		tcell.NewRGBColor(0, 255, 0),     // Green
+		tcell.NewRGBColor(0, 0, 255),     // Blue
+		tcell.NewRGBColor(75, 0, 130),    // Indigo
+		tcell.NewRGBColor(148, 0, 211),   // Violet
+	}
+
 	for i, r := range text {
 		if x+i < tui.width {
-			tui.screen.SetContent(x+i, y, r, nil, style)
+			finalStyle := style
+			// Apply rainbow colors if in Rainbow theme
+			if CurrentTheme.Name == "RAINBOW" {
+				// Wider diagonal stripes: divide by 4 for better readability
+				colorIdx := (((x + i) + y) / 4) % len(rainbowColors)
+				finalStyle = tcell.StyleDefault.Foreground(rainbowColors[colorIdx])
+			}
+			tui.screen.SetContent(x+i, y, r, nil, finalStyle)
 		}
 	}
 }
 
 func (tui *TUI) drawBox(x, y, width, height int, title string, style tcell.Style) {
-	// Top border
-	tui.screen.SetContent(x, y, '╔', nil, style)
-	for i := 1; i < width-1; i++ {
-		tui.screen.SetContent(x+i, y, '═', nil, style)
+	// Rainbow colors for Rainbow theme
+	rainbowColors := []tcell.Color{
+		tcell.NewRGBColor(255, 0, 0),     // Red
+		tcell.NewRGBColor(255, 127, 0),   // Orange
+		tcell.NewRGBColor(255, 255, 0),   // Yellow
+		tcell.NewRGBColor(0, 255, 0),     // Green
+		tcell.NewRGBColor(0, 0, 255),     // Blue
+		tcell.NewRGBColor(75, 0, 130),    // Indigo
+		tcell.NewRGBColor(148, 0, 211),   // Violet
 	}
-	tui.screen.SetContent(x+width-1, y, '╗', nil, style)
+
+	getRainbowStyle := func(px, py int, baseStyle tcell.Style) tcell.Style {
+		if CurrentTheme.Name == "RAINBOW" {
+			// Wider diagonal stripes: divide by 4 for better readability
+			colorIdx := ((px + py) / 4) % len(rainbowColors)
+			return tcell.StyleDefault.Foreground(rainbowColors[colorIdx])
+		}
+		return baseStyle
+	}
+
+	// Top border
+	tui.screen.SetContent(x, y, '╔', nil, getRainbowStyle(x, y, style))
+	for i := 1; i < width-1; i++ {
+		tui.screen.SetContent(x+i, y, '═', nil, getRainbowStyle(x+i, y, style))
+	}
+	tui.screen.SetContent(x+width-1, y, '╗', nil, getRainbowStyle(x+width-1, y, style))
 
 	// Title
 	if title != "" {
@@ -568,16 +676,16 @@ func (tui *TUI) drawBox(x, y, width, height int, title string, style tcell.Style
 
 	// Sides
 	for i := 1; i < height-1; i++ {
-		tui.screen.SetContent(x, y+i, '║', nil, style)
-		tui.screen.SetContent(x+width-1, y+i, '║', nil, style)
+		tui.screen.SetContent(x, y+i, '║', nil, getRainbowStyle(x, y+i, style))
+		tui.screen.SetContent(x+width-1, y+i, '║', nil, getRainbowStyle(x+width-1, y+i, style))
 	}
 
 	// Bottom border
-	tui.screen.SetContent(x, y+height-1, '╚', nil, style)
+	tui.screen.SetContent(x, y+height-1, '╚', nil, getRainbowStyle(x, y+height-1, style))
 	for i := 1; i < width-1; i++ {
-		tui.screen.SetContent(x+i, y+height-1, '═', nil, style)
+		tui.screen.SetContent(x+i, y+height-1, '═', nil, getRainbowStyle(x+i, y+height-1, style))
 	}
-	tui.screen.SetContent(x+width-1, y+height-1, '╝', nil, style)
+	tui.screen.SetContent(x+width-1, y+height-1, '╝', nil, getRainbowStyle(x+width-1, y+height-1, style))
 }
 
 func (tui *TUI) generateSkittlesColors() {
@@ -612,8 +720,301 @@ func (tui *TUI) generateSkittlesColors() {
 	}
 }
 
+// ===========================================================================
+// MAZE PATHFINDING ANIMATION
+// ===========================================================================
+
+func (tui *TUI) initMaze() {
+	// Safety check: ensure dimensions are positive
+	if tui.mazeWidth <= 0 || tui.mazeHeight <= 0 {
+		return
+	}
+
+	// Initialize maze grid
+	tui.maze = make([][]rune, tui.mazeHeight)
+	tui.mazeVisited = make([][]bool, tui.mazeHeight)
+
+	for y := 0; y < tui.mazeHeight; y++ {
+		tui.maze[y] = make([]rune, tui.mazeWidth)
+		tui.mazeVisited[y] = make([]bool, tui.mazeWidth)
+
+		for x := 0; x < tui.mazeWidth; x++ {
+			if x == 0 || x == tui.mazeWidth-1 || y == 0 || y == tui.mazeHeight-1 {
+				tui.maze[y][x] = '#'
+			} else if rand.Float32() < 0.25 {
+				tui.maze[y][x] = '#'
+			} else {
+				tui.maze[y][x] = ' '
+			}
+			tui.mazeVisited[y][x] = false
+		}
+	}
+
+	tui.mazeStart = Point{1, 1}
+	tui.mazeEnd = Point{tui.mazeWidth - 2, tui.mazeHeight - 2}
+
+	tui.maze[tui.mazeStart.y][tui.mazeStart.x] = 'S'
+	tui.maze[tui.mazeEnd.y][tui.mazeEnd.x] = 'X'
+
+	// Pre-calculate entire BFS solution to build animation sequence
+	tui.mazeAnimationSequence = []func(){}
+	queue := []QueueItem{{pos: tui.mazeStart, path: []Point{}}}
+	visited := make([][]bool, tui.mazeHeight)
+	for y := 0; y < tui.mazeHeight; y++ {
+		visited[y] = make([]bool, tui.mazeWidth)
+	}
+	visited[tui.mazeStart.y][tui.mazeStart.x] = true
+
+	var finalPath []Point
+	foundPath := false
+
+	// Run BFS to completion and record each step
+	for len(queue) > 0 && !foundPath {
+		current := queue[0]
+		queue = queue[1:]
+
+		// Check if we reached the end
+		if current.pos.x == tui.mazeEnd.x && current.pos.y == tui.mazeEnd.y {
+			finalPath = current.path
+			foundPath = true
+			break
+		}
+
+		// Add multiple animation frames for exploring this position
+		// SLOW exploration = visible searching simulation (blue dots spreading)
+		pos := current.pos
+		for i := 0; i < 20; i++ { // 20 frames per exploration - slow and visible
+			tui.mazeAnimationSequence = append(tui.mazeAnimationSequence, func() {
+				if tui.maze[pos.y][pos.x] != 'S' && tui.maze[pos.y][pos.x] != 'X' {
+					tui.maze[pos.y][pos.x] = '·'
+				}
+			})
+		}
+
+		// Explore neighbors
+		neighbors := tui.getMazeNeighbors(current.pos, visited)
+		for _, neighbor := range neighbors {
+			visited[neighbor.y][neighbor.x] = true
+			newPath := append([]Point{}, current.path...)
+			newPath = append(newPath, current.pos)
+			queue = append(queue, QueueItem{pos: neighbor, path: newPath})
+
+			// Add multiple animation frames for marking as queued
+			nPos := neighbor
+			for i := 0; i < 10; i++ { // 10 frames per neighbor - part of slow exploration
+				tui.mazeAnimationSequence = append(tui.mazeAnimationSequence, func() {
+					if tui.maze[nPos.y][nPos.x] != 'X' {
+						tui.maze[nPos.y][nPos.x] = '?'
+					}
+				})
+			}
+		}
+	}
+
+	// Add path drawing steps - slower so it reaches X at exactly 100%
+	if foundPath {
+		for _, p := range finalPath {
+			pathPos := p
+			// Even slower path drawing - 120 frames per cell so it reaches X at 100%
+			for i := 0; i < 120; i++ {
+				tui.mazeAnimationSequence = append(tui.mazeAnimationSequence, func() {
+					if tui.maze[pathPos.y][pathPos.x] != 'S' && tui.maze[pathPos.y][pathPos.x] != 'X' {
+						tui.maze[pathPos.y][pathPos.x] = '*'
+					}
+				})
+			}
+		}
+	}
+
+	// Calculate total steps so far
+	baseSteps := len(tui.mazeAnimationSequence)
+
+	// Add very minimal padding - just 2-3% extra so animation completes at 98-100%
+	paddingFrames := baseSteps / 40 // Add ~2.5% padding
+	for i := 0; i < paddingFrames; i++ {
+		tui.mazeAnimationSequence = append(tui.mazeAnimationSequence, func() {
+			// No-op frame, just holds the final state very briefly
+		})
+	}
+
+	// Reset state for animation
+	tui.mazeAnimating = true
+	tui.mazeComplete = false
+	tui.mazeCurrentStep = 0
+	tui.mazeTotalSolutionSteps = len(tui.mazeAnimationSequence)
+}
+
+func (tui *TUI) getMazeNeighbors(pos Point, visited [][]bool) []Point {
+	neighbors := []Point{}
+	dirs := []Point{{0, -1}, {1, 0}, {0, 1}, {-1, 0}}
+
+	for _, dir := range dirs {
+		newX := pos.x + dir.x
+		newY := pos.y + dir.y
+
+		if newX > 0 && newX < tui.mazeWidth-1 && newY > 0 && newY < tui.mazeHeight-1 &&
+			tui.maze[newY][newX] != '#' && !visited[newY][newX] {
+			neighbors = append(neighbors, Point{newX, newY})
+		}
+	}
+
+	return neighbors
+}
+
+func (tui *TUI) stepMazeAnimation() {
+	// In free mode, auto-restart when complete ONLY if no scan has ever run (idle state)
+	if !tui.mazeSyncMode && tui.mazeComplete && !tui.scanHasEverRun {
+		tui.initMaze() // Generate new maze and restart
+		return
+	}
+
+	if !tui.mazeAnimating || tui.mazeComplete {
+		return
+	}
+
+	// Check if we've finished all animation steps
+	if tui.mazeCurrentStep >= tui.mazeTotalSolutionSteps {
+		tui.mazeComplete = true
+		tui.mazeAnimating = false
+		return
+	}
+
+	if tui.mazeSyncMode {
+		// Sync mode: Step based on scan progress
+		completed := atomic.LoadInt64(&tui.scanner.LiveStats.CompletedRequests)
+		total := tui.scanner.LiveStats.TotalRequests
+
+		if total > 0 && tui.mazeTotalSolutionSteps > 0 {
+			var targetStep int
+
+			// If scan is complete, ensure we execute ALL remaining frames
+			if completed >= total {
+				targetStep = tui.mazeTotalSolutionSteps
+			} else {
+				// Calculate target step based on scan progress
+				scanProgress := float64(completed) / float64(total)
+				targetStep = int(scanProgress * float64(tui.mazeTotalSolutionSteps))
+			}
+
+			// Execute ALL animation steps up to target instantly
+			// This makes animation speed match actual scan speed (fast scan = fast animation)
+			for tui.mazeCurrentStep < targetStep && tui.mazeCurrentStep < tui.mazeTotalSolutionSteps {
+				if tui.mazeCurrentStep < len(tui.mazeAnimationSequence) {
+					tui.mazeAnimationSequence[tui.mazeCurrentStep]()
+				}
+				tui.mazeCurrentStep++
+			}
+
+			// Check if we completed after sync execution
+			if tui.mazeCurrentStep >= tui.mazeTotalSolutionSteps {
+				tui.mazeComplete = true
+				tui.mazeAnimating = false
+			}
+		}
+	} else {
+		// Free running mode: Step through frames for watchable animation
+		// With increased frames, stepping 120 frames = smooth ~12-15 second animation
+		// Visual animation completes near 100%, minimal hold at end
+		framesPerStep := 120
+		for i := 0; i < framesPerStep && tui.mazeCurrentStep < tui.mazeTotalSolutionSteps; i++ {
+			if tui.mazeCurrentStep < len(tui.mazeAnimationSequence) {
+				tui.mazeAnimationSequence[tui.mazeCurrentStep]()
+			}
+			tui.mazeCurrentStep++
+		}
+	}
+}
+
+func (tui *TUI) renderMaze(startX, startY int) {
+	// Safety check: ensure maze is initialized and has valid dimensions
+	if tui.maze == nil || len(tui.maze) == 0 || tui.mazeHeight <= 0 || tui.mazeWidth <= 0 {
+		return
+	}
+
+	// Draw maze box
+	boxStyle := tcell.StyleDefault.Foreground(CurrentTheme.Border)
+	if CurrentTheme.Name == "SKITTLES" {
+		boxStyle = tcell.StyleDefault.Foreground(tui.skittlesBoxColors[2])
+	}
+	tui.drawBox(startX, startY, tui.mazeWidth+2, tui.mazeHeight+3, "PATHFINDER", boxStyle)
+
+	// Render maze with bounds checking
+	for y := 0; y < tui.mazeHeight && y < len(tui.maze); y++ {
+		for x := 0; x < tui.mazeWidth && x < len(tui.maze[y]); x++ {
+			char := tui.maze[y][x]
+			var style tcell.Style
+
+			switch char {
+			case '#':
+				style = tcell.StyleDefault.Foreground(CurrentTheme.Border)
+			case 'S':
+				style = tcell.StyleDefault.Foreground(CurrentTheme.Success).Bold(true)
+			case 'X':
+				style = tcell.StyleDefault.Foreground(CurrentTheme.Danger).Bold(true)
+			case '*':
+				style = tcell.StyleDefault.Foreground(CurrentTheme.Warning).Bold(true)
+			case '·':
+				style = tcell.StyleDefault.Foreground(CurrentTheme.Info).Dim(true)
+			case '?':
+				style = tcell.StyleDefault.Foreground(CurrentTheme.Primary)
+			default:
+				style = tcell.StyleDefault.Foreground(CurrentTheme.Text).Dim(true)
+			}
+
+			tui.screen.SetContent(startX+x+1, startY+y+2, char, nil, style)
+		}
+	}
+
+	// Status text
+	statusY := startY + tui.mazeHeight + 2
+
+	if tui.mazeComplete {
+		status := "Complete! Press F6 to reset"
+		tui.drawText(startX+2, statusY, status, tcell.StyleDefault.Foreground(CurrentTheme.Success))
+	} else if tui.mazeAnimating && tui.mazeSyncMode {
+		// Get scan progress to show in status
+		completed := atomic.LoadInt64(&tui.scanner.LiveStats.CompletedRequests)
+		total := tui.scanner.LiveStats.TotalRequests
+		progress := int(float64(completed) / float64(total) * 100)
+
+		// Show maze and scan progress
+		mazeProgress := 0
+		if tui.mazeTotalSolutionSteps > 0 {
+			mazeProgress = int(float64(tui.mazeCurrentStep) / float64(tui.mazeTotalSolutionSteps) * 100)
+		}
+		status := fmt.Sprintf("Pathfinding... %d%% (scan: %d%%)", mazeProgress, progress)
+		tui.drawText(startX+2, statusY, status, tcell.StyleDefault.Foreground(CurrentTheme.Primary))
+	} else if tui.mazeAnimating {
+		mazeProgress := 0
+		if tui.mazeTotalSolutionSteps > 0 {
+			mazeProgress = int(float64(tui.mazeCurrentStep) / float64(tui.mazeTotalSolutionSteps) * 100)
+		}
+		status := fmt.Sprintf("Pathfinding... %d%% (F6 to reset)", mazeProgress)
+		tui.drawText(startX+2, statusY, status, tcell.StyleDefault.Foreground(CurrentTheme.Info))
+	}
+}
+
 func (tui *TUI) Render() {
 	tui.screen.Clear()
+
+	// Update dimensions if terminal was resized
+	newWidth, newHeight := tui.screen.Size()
+	if newWidth != tui.width || newHeight != tui.height {
+		tui.width = newWidth
+		tui.height = newHeight
+
+		// Recalculate maze WIDTH based on new terminal size (height stays fixed at 14)
+		titleWidth := tui.width - 4
+		boxWidth := titleWidth/2 - 1
+		newMazeWidth := boxWidth - 2
+
+		// Only regenerate maze if WIDTH changed (keep height fixed at 14)
+		if newMazeWidth != tui.mazeWidth && newMazeWidth > 0 {
+			tui.mazeWidth = newMazeWidth
+			// Keep height fixed at 14 - don't change it
+			tui.initMaze() // Regenerate maze with new width
+		}
+	}
 
 	if tui.showSplash {
 		tui.renderSplashScreen()
@@ -633,8 +1034,8 @@ func (tui *TUI) Render() {
 }
 
 func (tui *TUI) renderSplashScreen() {
-	// ASCII art for /PATHFINDER - using standard ASCII characters
-	logo := []string{
+	// Full ASCII art for /PATHFINDER (110 chars wide)
+	logoFull := []string{
 		"",
 		"      //   ########     ###    ########  ##     ## ######## #### ##    ## ########  ######## ########  ",
 		"     //    ##     ##   ## ##      ##     ##     ## ##        ##  ###   ## ##     ## ##       ##     ## ",
@@ -646,7 +1047,101 @@ func (tui *TUI) renderSplashScreen() {
 		"",
 	}
 
-	subtitle := "DEATH STAR EDITION"
+	// Compact ASCII art for medium terminals (~50 chars)
+	logoCompact := []string{
+		"",
+		"  //  ####      #     #####  #   #",
+		" //   #   #    # #      #    #   #",
+		"//    ####    #   #     #    #####",
+		"      #      #######    #    #   #",
+		"      #      #     #    #    #   #",
+		"",
+		"##### ### #   # ####  ##### ####",
+		"#      #  ##  # #   # #     #   #",
+		"####   #  # # # #   # ####  ####",
+		"#      #  #  ## #   # #     #  #",
+		"#     ### #   # ####  ##### #   #",
+		"",
+	}
+
+	// Medium size with diagonal slashes (13 chars max)
+	logoMedium := []string{
+		"",
+		"   //  PATH",
+		"  //   FINDER",
+		" //    v" + Version,
+		"//",
+		"",
+	}
+
+	// Small size with slashes (15 chars max)
+	logoSmall := []string{
+		"",
+		"  // PATHFINDER",
+		" //  v" + Version,
+		"//",
+		"",
+	}
+
+	// Compact single line (20 chars)
+	logoCompactLine := []string{
+		"",
+		"",
+		"// PATHFINDER v" + Version,
+		"",
+		"",
+	}
+
+	// Minimal - just brand (~10 chars)
+	logoMinimal := []string{
+		"",
+		"",
+		"PATHFINDER",
+		"",
+		"",
+	}
+
+	// Tiny - just slashes (2 chars)
+	logoTiny := []string{
+		"",
+		"",
+		"//",
+		"",
+		"",
+	}
+
+	// Get maximum line width for a logo
+	getMaxWidth := func(logo []string) int {
+		maxLen := 0
+		for _, line := range logo {
+			if len(line) > maxLen {
+				maxLen = len(line)
+			}
+		}
+		return maxLen
+	}
+
+	// Dynamic logo selection - use width minus small safety margin for centering
+	var logo []string
+	safeWidth := tui.width - 4 // Leave 2 chars on each side for safe centering
+
+	if getMaxWidth(logoFull) <= safeWidth {
+		logo = logoFull // 110 chars - full ASCII art
+	} else if getMaxWidth(logoCompact) <= safeWidth {
+		logo = logoCompact // 35 chars - compact ASCII art
+	} else if getMaxWidth(logoCompactLine) <= safeWidth {
+		logo = logoCompactLine // 20 chars - single line with slashes
+	} else if getMaxWidth(logoSmall) <= safeWidth {
+		logo = logoSmall // 15 chars - compact diagonal slashes
+	} else if getMaxWidth(logoMedium) <= safeWidth {
+		logo = logoMedium // 13 chars - diagonal slashes with PATH/FINDER
+	} else if getMaxWidth(logoMinimal) <= safeWidth {
+		logo = logoMinimal // 10 chars - just brand name
+	} else {
+		logo = logoTiny // 2 chars - just slashes
+	}
+
+	subtitle := ""
 	tagline := "Web Path Discovery & Reconnaissance Tool"
 	author := "by Ringmast4r"
 	versionText := "v" + Version
@@ -673,29 +1168,39 @@ func (tui *TUI) renderSplashScreen() {
 		charCount := 0
 		for i, line := range logo {
 			y := startY + i
+			// Center if fits, otherwise align left with margin
 			x := (tui.width - len(line)) / 2
-			if x < 0 {
-				x = 0
+			if x < 1 {
+				x = 1 // Always leave 1 char margin
+			}
+			// Don't draw if line would extend past screen edge
+			if x+len(line) > tui.width {
+				continue // Skip lines that don't fit
 			}
 
 			for j, ch := range line {
 				charCount++
-				if charCount <= visibleChars {
+				if charCount <= visibleChars && x+j < tui.width && y < tui.height {
 					style := tcell.StyleDefault.Foreground(CurrentTheme.Primary).Bold(true)
 					tui.screen.SetContent(x+j, y, ch, nil, style)
 				}
 			}
 		}
 
-		// Show subtitle/author once logo is complete
-		if tui.splashProgress >= 0.95 {
+		// Show subtitle/author once logo is complete (skip for tiny terminals)
+		if tui.splashProgress >= 0.95 && tui.width >= 60 {
 			subtitleY := startY + logoHeight + 2
 			subtitleX := (tui.width - len(subtitle)) / 2
 			tui.drawText(subtitleX, subtitleY, subtitle, tcell.StyleDefault.Foreground(CurrentTheme.Success).Bold(true))
 
 			taglineY := subtitleY + 1
 			taglineX := (tui.width - len(tagline)) / 2
-			tui.drawText(taglineX, taglineY, tagline, tcell.StyleDefault.Foreground(CurrentTheme.Info))
+			// Truncate tagline if terminal is too small
+			displayTagline := tagline
+			if len(tagline) > tui.width-4 {
+				displayTagline = tagline[:tui.width-7] + "..."
+			}
+			tui.drawText(taglineX, taglineY, displayTagline, tcell.StyleDefault.Foreground(CurrentTheme.Info))
 
 			authorY := taglineY + 2
 			authorX := (tui.width - len(author)) / 2
@@ -713,32 +1218,47 @@ func (tui *TUI) renderSplashScreen() {
 		// Draw complete logo
 		for i, line := range logo {
 			y := startY + i
+			// Center if fits, otherwise align left with margin
 			x := (tui.width - len(line)) / 2
-			if x < 0 {
-				x = 0
+			if x < 1 {
+				x = 1 // Always leave 1 char margin
 			}
+			// Don't draw if line would extend past screen edge
+			if x+len(line) > tui.width {
+				continue // Skip lines that don't fit
+			}
+
 			for j, ch := range line {
-				style := tcell.StyleDefault.Foreground(CurrentTheme.Primary).Bold(true)
-				tui.screen.SetContent(x+j, y, ch, nil, style)
+				if x+j < tui.width && y < tui.height {
+					style := tcell.StyleDefault.Foreground(CurrentTheme.Primary).Bold(true)
+					tui.screen.SetContent(x+j, y, ch, nil, style)
+				}
 			}
 		}
 
-		// Draw all text
-		subtitleY := startY + logoHeight + 2
-		subtitleX := (tui.width - len(subtitle)) / 2
-		tui.drawText(subtitleX, subtitleY, subtitle, tcell.StyleDefault.Foreground(CurrentTheme.Success).Bold(true))
+		// Draw all text (only on wider terminals)
+		if tui.width >= 60 {
+			subtitleY := startY + logoHeight + 2
+			subtitleX := (tui.width - len(subtitle)) / 2
+			tui.drawText(subtitleX, subtitleY, subtitle, tcell.StyleDefault.Foreground(CurrentTheme.Success).Bold(true))
 
-		taglineY := subtitleY + 1
-		taglineX := (tui.width - len(tagline)) / 2
-		tui.drawText(taglineX, taglineY, tagline, tcell.StyleDefault.Foreground(CurrentTheme.Info))
+			taglineY := subtitleY + 1
+			taglineX := (tui.width - len(tagline)) / 2
+			// Truncate tagline if terminal is too small
+			displayTagline := tagline
+			if len(tagline) > tui.width-4 {
+				displayTagline = tagline[:tui.width-7] + "..."
+			}
+			tui.drawText(taglineX, taglineY, displayTagline, tcell.StyleDefault.Foreground(CurrentTheme.Info))
 
-		authorY := taglineY + 2
-		authorX := (tui.width - len(author)) / 2
-		tui.drawText(authorX, authorY, author, tcell.StyleDefault.Foreground(CurrentTheme.Text))
+			authorY := taglineY + 2
+			authorX := (tui.width - len(author)) / 2
+			tui.drawText(authorX, authorY, author, tcell.StyleDefault.Foreground(CurrentTheme.Text))
 
-		versionY := authorY + 1
-		versionX := (tui.width - len(versionText)) / 2
-		tui.drawText(versionX, versionY, versionText, tcell.StyleDefault.Foreground(CurrentTheme.Text).Dim(true))
+			versionY := authorY + 1
+			versionX := (tui.width - len(versionText)) / 2
+			tui.drawText(versionX, versionY, versionText, tcell.StyleDefault.Foreground(CurrentTheme.Text).Dim(true))
+		}
 
 		// Increment through hold period
 		// At 20fps (50ms/frame), 3.5 seconds = 70 frames
@@ -761,10 +1281,36 @@ func (tui *TUI) renderGlobe() {
 	globeStartX := (tui.width - tui.globe.Width) / 2
 	globeStartY := (tui.height - tui.globe.Height) / 2
 
-	globeStyle := tcell.StyleDefault.Foreground(CurrentTheme.Globe)
+	// Rainbow colors for special themes
+	rainbowColors := []tcell.Color{
+		tcell.NewRGBColor(255, 0, 0),     // Red
+		tcell.NewRGBColor(255, 127, 0),   // Orange
+		tcell.NewRGBColor(255, 255, 0),   // Yellow
+		tcell.NewRGBColor(0, 255, 0),     // Green
+		tcell.NewRGBColor(0, 0, 255),     // Blue
+		tcell.NewRGBColor(75, 0, 130),    // Indigo
+		tcell.NewRGBColor(148, 0, 211),   // Violet
+	}
+
+	rainbowMode := CurrentTheme.Name == "RAINBOW"
+	skittlesMode := CurrentTheme.Name == "SKITTLES"
+
 	for y, row := range globeScreen {
 		for x, char := range row {
 			if char != ' ' {
+				var globeStyle tcell.Style
+				if rainbowMode {
+					// Rainbow mode: wider diagonal stripes for readability
+					colorIdx := ((x + y) / 4) % len(rainbowColors)
+					globeStyle = tcell.StyleDefault.Foreground(rainbowColors[colorIdx])
+				} else if skittlesMode {
+					// Skittles mode: randomized colors
+					colorIdx := ((x * 73) + (y * 37)) % len(rainbowColors)
+					globeStyle = tcell.StyleDefault.Foreground(rainbowColors[colorIdx])
+				} else {
+					// Standard theme color
+					globeStyle = tcell.StyleDefault.Foreground(CurrentTheme.Globe)
+				}
 				tui.screen.SetContent(globeStartX+x, globeStartY+y, char, nil, globeStyle)
 			}
 		}
@@ -861,9 +1407,10 @@ func (tui *TUI) renderDashboard() {
 		inputTextStyle = textStyle
 	} else if inputDisplay == "" {
 		inputDisplay = "Press Enter to activate..."
-		// Gentle pulsing white glow effect for placeholder text
-		glowIntensity := int((math.Sin(float64(tui.progressBarFrame)/20.0) + 1.0) * 60.0)
-		glowColor := tcell.NewRGBColor(int32(glowIntensity+150), int32(glowIntensity+150), int32(glowIntensity+150))
+		// Gentle pulsing white glow effect for placeholder text (stays bright, never goes dark)
+		// Pulses between RGB(200) bright white and RGB(255) pure white
+		glowIntensity := int((math.Sin(float64(tui.progressBarFrame)/20.0) + 1.0) * 27.5)
+		glowColor := tcell.NewRGBColor(int32(glowIntensity+200), int32(glowIntensity+200), int32(glowIntensity+200))
 		inputTextStyle = tcell.StyleDefault.Foreground(glowColor).Italic(true)
 	} else {
 		inputTextStyle = textStyle
@@ -890,11 +1437,16 @@ func (tui *TUI) renderDashboard() {
 	}
 	tui.drawText(4, 12, rpsText, tcell.StyleDefault.Foreground(CurrentTheme.Success))
 
+	// Show wordlist size (number of paths loaded)
+	wordlistCount := tui.scanner.LiveStats.TotalRequests
 	wordlistText := "Wordlist: wordlist.txt"
+	if wordlistCount > 0 {
+		wordlistText = fmt.Sprintf("Wordlist: wordlist.txt (%d paths)", wordlistCount)
+	}
 	tui.drawText(4, 13, wordlistText, tcell.StyleDefault.Foreground(CurrentTheme.Text).Dim(true))
 
-	// Progress box with animated bar
-	tui.drawBox(titleWidth/2+2, 3, titleWidth/2+1, 5, "PROGRESS", progressBoxStyle)
+	// Progress box with animated bar (increased height to fit duration)
+	tui.drawBox(titleWidth/2+2, 3, titleWidth/2+1, 6, "PROGRESS", progressBoxStyle)
 	percentage := float64(0)
 	if total > 0 {
 		percentage = float64(completed) / float64(total) * 100
@@ -948,17 +1500,26 @@ func (tui *TUI) renderDashboard() {
 	}
 	tui.drawText(titleWidth/2+4, 4, progressBar, tcell.StyleDefault.Foreground(barColor))
 
-	// Draw target acquired indicator if scan is running
+	// Stats below bar (completed/total | speed)
+	speed := tui.scanner.LiveStats.CurrentSpeed
+	statsText := fmt.Sprintf("%d/%d | %.0f req/s", completed, total, speed)
+	tui.drawText(titleWidth/2+4, 5, statsText, textStyle)
+
+	// Scan duration (your eye goes here first!)
+	var scanDuration time.Duration
+	if !tui.scanner.LiveStats.EndTime.IsZero() {
+		scanDuration = tui.scanner.LiveStats.EndTime.Sub(tui.scanner.LiveStats.StartTime)
+	} else if total > 0 {
+		scanDuration = time.Since(tui.scanner.LiveStats.StartTime)
+	}
+	durationProgressText := fmt.Sprintf("Duration: %s", formatDuration(scanDuration))
+	tui.drawText(titleWidth/2+4, 6, durationProgressText, tcell.StyleDefault.Foreground(CurrentTheme.Text).Dim(true))
+
+	// Draw target acquired indicator if scan is running (moved below progress box)
 	if completed > 0 && completed < total {
 		targetMsg := "⚡ Target acquired →"
-		tui.drawText(titleWidth/2+4, 6, targetMsg, tcell.StyleDefault.Foreground(CurrentTheme.Primary))
+		tui.drawText(titleWidth/2+4, 7, targetMsg, tcell.StyleDefault.Foreground(CurrentTheme.Primary))
 	}
-
-	// Stats below bar
-	speed := tui.scanner.LiveStats.CurrentSpeed
-	elapsed := time.Since(tui.scanner.LiveStats.StartTime)
-	statsText := fmt.Sprintf("%d/%d | %.0f req/s | %s", completed, total, speed, formatDuration(elapsed))
-	tui.drawText(titleWidth/2+4, 5, statsText, textStyle)
 
 	// Increment animation frame
 	tui.progressBarFrame++
@@ -985,34 +1546,50 @@ func (tui *TUI) renderDashboard() {
 	speedText := fmt.Sprintf("%-20s %6.0f req/s", "Speed:", tui.scanner.LiveStats.CurrentSpeed)
 	tui.drawText(4, 20, speedText, tcell.StyleDefault.Foreground(CurrentTheme.Info))
 
-	// Local Network Info box
-	var ipBoxStyle tcell.Style
-	if CurrentTheme.Name == "SKITTLES" {
-		ipBoxStyle = targetBoxStyle
+	// Local Network Info box (can be hidden for OpSec/screenshots)
+	mazeYPosition := 31 // Default position below network info (restored to original)
+	if !tui.hideNetworkInfo {
+		var ipBoxStyle tcell.Style
+		if CurrentTheme.Name == "SKITTLES" {
+			ipBoxStyle = targetBoxStyle
+		} else {
+			ipBoxStyle = boxStyle
+		}
+		tui.drawBox(2, 22, titleWidth/2-1, 9, "LOCAL NETWORK INFO", ipBoxStyle)
+
+		netInfo := getLocalNetworkInfo()
+		// More conservative truncation to prevent border overflow (box width - padding - label width)
+		maxValueWidth := (titleWidth/2 - 1) - 6 - 11  // box_width - padding - "Interface: " label
+		ifaceText := fmt.Sprintf("Interface: %s", truncateString(netInfo.Interface, maxValueWidth))
+		ipv4Text := fmt.Sprintf("IPv4:      %s", truncateString(netInfo.IPv4, maxValueWidth))
+		subnetText := fmt.Sprintf("Subnet:    %s", truncateString(netInfo.Subnet, maxValueWidth))
+		ipv6Text := fmt.Sprintf("IPv6:      %s", truncateString(netInfo.IPv6, maxValueWidth))
+		macText := fmt.Sprintf("MAC:       %s", truncateString(netInfo.MAC, maxValueWidth))
+		gatewayText := fmt.Sprintf("Gateway:   %s", truncateString(netInfo.Gateway, maxValueWidth))
+
+		tui.drawText(4, 23, ifaceText, tcell.StyleDefault.Foreground(CurrentTheme.Info))
+		tui.drawText(4, 24, ipv4Text, tcell.StyleDefault.Foreground(CurrentTheme.Info))
+		tui.drawText(4, 25, subnetText, tcell.StyleDefault.Foreground(CurrentTheme.Info))
+		tui.drawText(4, 26, ipv6Text, tcell.StyleDefault.Foreground(CurrentTheme.Info).Dim(true))
+		tui.drawText(4, 27, macText, tcell.StyleDefault.Foreground(CurrentTheme.Info))
+		tui.drawText(4, 28, gatewayText, tcell.StyleDefault.Foreground(CurrentTheme.Info))
+
+		// Add real-time clock
+		currentTime := time.Now().Format("15:04:05")
+		timeText := fmt.Sprintf("Time:      %s", currentTime)
+		tui.drawText(4, 29, timeText, tcell.StyleDefault.Foreground(CurrentTheme.Success).Bold(true))
 	} else {
-		ipBoxStyle = boxStyle
+		// When network info is hidden, move maze up to take its place
+		mazeYPosition = 22
 	}
-	tui.drawBox(2, 22, titleWidth/2-1, 9, "LOCAL NETWORK INFO", ipBoxStyle)
 
-	netInfo := getLocalNetworkInfo()
-	ifaceText := fmt.Sprintf("Interface: %s", truncateString(netInfo.Interface, titleWidth/2-16))
-	ipv4Text := fmt.Sprintf("IPv4:      %s", truncateString(netInfo.IPv4, titleWidth/2-16))
-	subnetText := fmt.Sprintf("Subnet:    %s", truncateString(netInfo.Subnet, titleWidth/2-16))
-	ipv6Text := fmt.Sprintf("IPv6:      %s", truncateString(netInfo.IPv6, titleWidth/2-16))
-	macText := fmt.Sprintf("MAC:       %s", truncateString(netInfo.MAC, titleWidth/2-16))
-	gatewayText := fmt.Sprintf("Gateway:   %s", truncateString(netInfo.Gateway, titleWidth/2-16))
-
-	tui.drawText(4, 23, ifaceText, tcell.StyleDefault.Foreground(CurrentTheme.Info))
-	tui.drawText(4, 24, ipv4Text, tcell.StyleDefault.Foreground(CurrentTheme.Info))
-	tui.drawText(4, 25, subnetText, tcell.StyleDefault.Foreground(CurrentTheme.Info))
-	tui.drawText(4, 26, ipv6Text, tcell.StyleDefault.Foreground(CurrentTheme.Info).Dim(true))
-	tui.drawText(4, 27, macText, tcell.StyleDefault.Foreground(CurrentTheme.Info))
-	tui.drawText(4, 28, gatewayText, tcell.StyleDefault.Foreground(CurrentTheme.Info))
+	// Pathfinding maze animation - position depends on network info visibility
+	tui.renderMaze(2, mazeYPosition)
 
 	// Live results box - extend down to just above controls
 	controlsY := tui.height - 3
-	resultsHeight := controlsY - 8  // From Y=8 to controls box
-	tui.drawBox(titleWidth/2+2, 8, titleWidth/2+1, resultsHeight, "LIVE RESULTS", resultsBoxStyle)
+	resultsHeight := controlsY - 9  // From Y=9 to controls box (adjusted for taller Progress box)
+	tui.drawBox(titleWidth/2+2, 9, titleWidth/2+1, resultsHeight, "LIVE RESULTS", resultsBoxStyle)
 
 	tui.scanner.resultsMutex.Lock()
 	results := tui.scanner.lastResults
@@ -1060,19 +1637,45 @@ func (tui *TUI) renderDashboard() {
 
 		path := truncateString(result.OriginalPath, titleWidth/2-25)
 		line := fmt.Sprintf("%-10s [%d] %s", label, result.FinalStatus, path)
-		tui.drawText(titleWidth/2+4, 9+i-startIdx, line, tcell.StyleDefault.Foreground(color))
+		tui.drawText(titleWidth/2+4, 10+i-startIdx, line, tcell.StyleDefault.Foreground(color))
 	}
 
 	// Show scroll indicator if there are more results
 	if totalResults > maxVisible {
 		scrollIndicator := fmt.Sprintf("(%d/%d)", startIdx+maxVisible, totalResults)
-		tui.drawText(titleWidth/2+titleWidth/2-len(scrollIndicator)-3, 8, scrollIndicator, tcell.StyleDefault.Foreground(CurrentTheme.Info).Dim(true))
+		tui.drawText(titleWidth/2+titleWidth/2-len(scrollIndicator)-3, 9, scrollIndicator, tcell.StyleDefault.Foreground(CurrentTheme.Info).Dim(true))
 	}
 
 	// Controls box
 	controlsY = tui.height - 3
 	tui.drawBox(2, controlsY, titleWidth, 3, "", controlsBoxStyle)
-	controls := fmt.Sprintf("Theme: %s | F1: Cycle | F3: Globe | F4: Config | F5: Export | ?: Help | Q: Quit", CurrentTheme.Name)
+
+	// Get theme key number
+	themeKey := ""
+	switch CurrentTheme.Name {
+	case "SKITTLES":
+		themeKey = "1"
+	case "BLOOD":
+		themeKey = "2"
+	case "MATRIX":
+		themeKey = "3"
+	case "CYBER":
+		themeKey = "4"
+	case "WHITE":
+		themeKey = "5"
+	case "DARK":
+		themeKey = "6"
+	case "PURPLE":
+		themeKey = "7"
+	case "AMBER":
+		themeKey = "8"
+	case "NEON":
+		themeKey = "9"
+	case "RAINBOW":
+		themeKey = "0"
+	}
+
+	controls := fmt.Sprintf("Theme: %s (%s) | F4: Config | F5: Export | ?: Help | Q: Quit", CurrentTheme.Name, themeKey)
 	controlsX := (titleWidth - len(controls)) / 2
 	tui.drawText(2+controlsX, controlsY+1, controls, tcell.StyleDefault.Foreground(CurrentTheme.Info))
 }
@@ -1355,108 +1958,215 @@ func (tui *TUI) renderHelpScreen() {
 	titleStyle := tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Primary).Bold(true)
 	labelStyle := tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Success).Bold(true)
 
-	line := helpY + 2
+	line := helpY + 2 - tui.helpScrollOffset
 	col := helpX + 2
+	minVisibleLine := helpY + 2
+	maxVisibleLine := helpY + helpHeight - 3
 
 	// Overview
-	tui.drawText(col, line, "OVERVIEW", titleStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "OVERVIEW", titleStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "PathFinder is a web path discovery tool that scans target URLs for existing", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "PathFinder is a web path discovery tool that scans target URLs for existing", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "paths and directories using a wordlist. It tracks response codes, redirects,", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "paths and directories using a wordlist. It tracks response codes, redirects,", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "and provides real-time feedback during scanning.", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "and provides real-time feedback during scanning.", textStyle)
+	}
 	line += 2
 
 	// Configuration Settings
-	tui.drawText(col, line, "SCAN CONFIGURATION", titleStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "SCAN CONFIGURATION", titleStyle)
+	}
 	line += 1
 
-	tui.drawText(col, line, "Method:", labelStyle)
-	tui.drawText(col+18, line, "HTTP method to use (GET, POST, HEAD, PUT, DELETE, PATCH)", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "Method:", labelStyle)
+		tui.drawText(col+18, line, "HTTP method to use (GET, POST, HEAD, PUT, DELETE, PATCH)", textStyle)
+	}
 	line += 1
-	tui.drawText(col+18, line, "Default: GET | Use GET for most scans", tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text).Dim(true))
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col+18, line, "Default: GET | Use GET for most scans", tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text).Dim(true))
+	}
 	line += 2
 
-	tui.drawText(col, line, "Timeout:", labelStyle)
-	tui.drawText(col+18, line, "Max wait time per HTTP request before giving up", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "Timeout:", labelStyle)
+		tui.drawText(col+18, line, "Max wait time per HTTP request before giving up", textStyle)
+	}
 	line += 1
-	tui.drawText(col+18, line, "Default: 10s | Increase for slow servers, decrease for fast networks", tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text).Dim(true))
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col+18, line, "Default: 10s | Increase for slow servers, decrease for fast networks", tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text).Dim(true))
+	}
 	line += 2
 
-	tui.drawText(col, line, "Concurrency:", labelStyle)
-	tui.drawText(col+18, line, "Number of simultaneous requests to send", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "Concurrency:", labelStyle)
+		tui.drawText(col+18, line, "Number of simultaneous requests to send", textStyle)
+	}
 	line += 1
-	tui.drawText(col+18, line, "Default: 50 | Higher = faster but more aggressive", tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text).Dim(true))
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col+18, line, "Default: 50 | Higher = faster but more aggressive", tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text).Dim(true))
+	}
 	line += 2
 
-	tui.drawText(col, line, "Rate Limit:", labelStyle)
-	tui.drawText(col+18, line, "Maximum requests per second (0 = unlimited)", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "Rate Limit:", labelStyle)
+		tui.drawText(col+18, line, "Maximum requests per second (0 = unlimited)", textStyle)
+	}
 	line += 1
-	tui.drawText(col+18, line, "Use to avoid overwhelming target or triggering rate limits", tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text).Dim(true))
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col+18, line, "Use to avoid overwhelming target or triggering rate limits", tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text).Dim(true))
+	}
 	line += 2
 
-	tui.drawText(col, line, "Wordlist:", labelStyle)
-	tui.drawText(col+18, line, "File containing paths to scan (one per line)", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "Wordlist:", labelStyle)
+		tui.drawText(col+18, line, "File containing paths to scan (one per line)", textStyle)
+	}
 	line += 1
-	tui.drawText(col+18, line, "Default: wordlist.txt in current directory", tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text).Dim(true))
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col+18, line, "Default: wordlist.txt in current directory", tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text).Dim(true))
+	}
 	line += 2
 
 	// Statistics Explained
-	tui.drawText(col, line, "STATISTICS", titleStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "STATISTICS", titleStyle)
+	}
 	line += 1
 
-	tui.drawText(col, line, "Direct 200s:", labelStyle)
-	tui.drawText(col+18, line, "Paths that returned HTTP 200 without any redirects", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "Direct 200s:", labelStyle)
+		tui.drawText(col+18, line, "Paths that returned HTTP 200 without any redirects", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "Redirects:", labelStyle)
-	tui.drawText(col+18, line, "Paths that redirected to another URL (3xx status codes)", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "Redirects:", labelStyle)
+		tui.drawText(col+18, line, "Paths that redirected to another URL (3xx status codes)", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "Protected:", labelStyle)
-	tui.drawText(col+18, line, "Paths requiring authentication (401/403 status codes)", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "Protected:", labelStyle)
+		tui.drawText(col+18, line, "Paths requiring authentication (401/403 status codes)", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "Errors:", labelStyle)
-	tui.drawText(col+18, line, "Failed requests due to network errors or timeouts", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "Errors:", labelStyle)
+		tui.drawText(col+18, line, "Failed requests due to network errors or timeouts", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "Speed:", labelStyle)
-	tui.drawText(col+18, line, "Current scanning speed in requests per second", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "Speed:", labelStyle)
+		tui.drawText(col+18, line, "Current scanning speed in requests per second", textStyle)
+	}
 	line += 2
 
 	// Keyboard Shortcuts
-	tui.drawText(col, line, "KEYBOARD SHORTCUTS", titleStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "KEYBOARD SHORTCUTS", titleStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "F1:", labelStyle)
-	tui.drawText(col+12, line, "Cycle through color themes", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "F1:", labelStyle)
+		tui.drawText(col+12, line, "Toggle this help screen (industry standard)", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "F3:", labelStyle)
-	tui.drawText(col+12, line, "Toggle Globe Mode (animated Earth visualization)", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "F2:", labelStyle)
+		tui.drawText(col+12, line, "Toggle local network info visibility (OpSec/screenshot mode)", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "F4:", labelStyle)
-	tui.drawText(col+12, line, "Open configuration menu to adjust scan settings", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "F3:", labelStyle)
+		tui.drawText(col+12, line, "Regenerate Skittles theme with new random colors", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "F5:", labelStyle)
-	tui.drawText(col+12, line, "Export executive summary report for pentest documentation", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "F4:", labelStyle)
+		tui.drawText(col+12, line, "Open configuration menu to adjust scan settings", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "Enter:", labelStyle)
-	tui.drawText(col+12, line, "Activate input field to enter a new target URL", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "F5:", labelStyle)
+		tui.drawText(col+12, line, "Export executive summary report for pentest documentation", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "↑/↓:", labelStyle)
-	tui.drawText(col+12, line, "Scroll through live results (Up/Down arrow keys)", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "F6:", labelStyle)
+		tui.drawText(col+12, line, "Reset pathfinding maze animation (generate new maze)", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "?:", labelStyle)
-	tui.drawText(col+12, line, "Toggle this help screen", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "Delete:", labelStyle)
+		tui.drawText(col+12, line, "Cancel active scan immediately", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "Q:", labelStyle)
-	tui.drawText(col+12, line, "Quit PathFinder", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "`:", labelStyle)
+		tui.drawText(col+12, line, "Cycle through color themes (backtick key)", textStyle)
+	}
 	line += 1
-	tui.drawText(col, line, "1-8:", labelStyle)
-	tui.drawText(col+12, line, "Switch to specific theme (Matrix, Rainbow, Cyber, Blood, etc.)", textStyle)
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "Enter:", labelStyle)
+		tui.drawText(col+12, line, "Activate input field to enter a new target URL", textStyle)
+	}
+	line += 1
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "↑/↓:", labelStyle)
+		tui.drawText(col+12, line, "Scroll this help screen (Up/Down arrow keys)", textStyle)
+	}
+	line += 1
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "?:", labelStyle)
+		tui.drawText(col+12, line, "Toggle this help screen (alternative to F1)", textStyle)
+	}
+	line += 1
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "Q:", labelStyle)
+		tui.drawText(col+12, line, "Quit PathFinder", textStyle)
+	}
+	line += 1
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col, line, "1-9,0:", labelStyle)
+		tui.drawText(col+12, line, "Theme shortcuts:", textStyle)
+	}
+	line += 1
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col+12, line, "1:Skittles 2:Blood 3:Matrix 4:Cyber 5:White", textStyle)
+	}
+	line += 1
+	if line >= minVisibleLine && line <= maxVisibleLine {
+		tui.drawText(col+12, line, "6:Dark 7:Purple 8:Amber 9:Neon 0:Rainbow", textStyle)
+	}
 	line += 2
 
 	// Close instruction
-	closeText := "Press ? or Esc to close this help screen"
+	closeText := "Press F1, ?, or Esc to close this help screen"
 	closeX := helpX + (helpWidth-len(closeText))/2
 	tui.drawText(closeX, helpY+helpHeight-2, closeText, tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Warning).Bold(true))
+
+	// Calculate and enforce scroll bounds
+	// line now contains the total content height (last line position + any spacing)
+	totalContentHeight := line - (helpY + 2 - tui.helpScrollOffset) // Calculate actual content height
+	visibleHeight := maxVisibleLine - minVisibleLine + 1
+	maxScrollOffset := totalContentHeight - visibleHeight
+	if maxScrollOffset < 0 {
+		maxScrollOffset = 0
+	}
+	if tui.helpScrollOffset > maxScrollOffset {
+		tui.helpScrollOffset = maxScrollOffset
+	}
+	if tui.helpScrollOffset < 0 {
+		tui.helpScrollOffset = 0
+	}
 }
 
 func (tui *TUI) HandleInput() {
@@ -1574,16 +2284,23 @@ func (tui *TUI) HandleInput() {
 
 			switch ev.Key() {
 			case tcell.KeyUp:
-				// Scroll results up
-				if !tui.showConfigMenu && !tui.inputActive {
+				// Scroll help screen or results up
+				if tui.showHelpScreen {
+					tui.helpScrollOffset -= 1
+					if tui.helpScrollOffset < 0 {
+						tui.helpScrollOffset = 0
+					}
+				} else if !tui.showConfigMenu && !tui.inputActive {
 					tui.resultsScrollOffset -= 1
 					if tui.resultsScrollOffset < 0 {
 						tui.resultsScrollOffset = 0
 					}
 				}
 			case tcell.KeyDown:
-				// Scroll results down
-				if !tui.showConfigMenu && !tui.inputActive {
+				// Scroll help screen or results down
+				if tui.showHelpScreen {
+					tui.helpScrollOffset += 1
+				} else if !tui.showConfigMenu && !tui.inputActive {
 					tui.resultsScrollOffset += 1
 				}
 			case tcell.KeyEscape, tcell.KeyCtrlC:
@@ -1600,23 +2317,32 @@ func (tui *TUI) HandleInput() {
 				tui.running = false
 				return
 			case tcell.KeyF1:
-				// F1 - Cycle theme
-				tui.cycleTheme('0')
+				// F1 - Toggle Help Screen (INDUSTRY STANDARD)
+				tui.showHelpScreen = !tui.showHelpScreen
 			case tcell.KeyF2:
-				// F2 - Activate Skittles theme with random colors
+				// F2 - Toggle local network info visibility (OpSec/screenshot mode)
+				tui.hideNetworkInfo = !tui.hideNetworkInfo
+			case tcell.KeyF3:
+				// F3 - Regenerate Skittles colors
 				CurrentTheme = ThemeSkittles
 				tui.screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
 				// Reset lastTheme to force color regeneration
 				tui.lastTheme = ""
-			case tcell.KeyF3:
-				// F3 - Toggle Globe Mode
-				tui.showGlobe = !tui.showGlobe
 			case tcell.KeyF4:
 				// F4 - Toggle Config Menu
 				tui.showConfigMenu = !tui.showConfigMenu
 			case tcell.KeyF5:
 				// F5 - Export Executive Summary Report
 				tui.exportExecutiveSummary()
+			case tcell.KeyF6:
+				// F6 - Reset maze pathfinding animation and exit sync mode
+				tui.initMaze()
+				tui.mazeSyncMode = false
+			case tcell.KeyDelete:
+				// Delete - Cancel active scan
+				tui.scanner.cancelMutex.Lock()
+				tui.scanner.cancelScan = true
+				tui.scanner.cancelMutex.Unlock()
 			case tcell.KeyEnter:
 				// Enter - Toggle input field active/inactive, or submit if active with text
 				if !tui.showGlobe {
@@ -1644,27 +2370,35 @@ func (tui *TUI) HandleInput() {
 						tui.running = false
 						return
 					case '?':
-						// Toggle help screen
+						// Toggle help screen (alternative to F1)
 						tui.showHelpScreen = !tui.showHelpScreen
+					case '`':
+						// Backtick - Cycle through themes
+						tui.cycleTheme(' ')
+					case '\\':
+						// Backslash - Toggle Globe Mode (EASTER EGG - not documented!)
+						tui.showGlobe = !tui.showGlobe
 					case ' ':
 						// Spacebar - Skip splash screen if showing
 						if tui.showSplash {
 							tui.showSplash = false
 						}
 					case '1':
-						CurrentTheme = ThemeMatrix
+						CurrentTheme = ThemeSkittles
 						tui.screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
+						// Reset lastTheme to force color regeneration
+						tui.lastTheme = ""
 					case '2':
-						CurrentTheme = ThemeRainbow
-						tui.screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
-					case '3':
-						CurrentTheme = ThemeCyber
-						tui.screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
-					case '4':
 						CurrentTheme = ThemeBlood
 						tui.screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
+					case '3':
+						CurrentTheme = ThemeMatrix
+						tui.screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
+					case '4':
+						CurrentTheme = ThemeCyber
+						tui.screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
 					case '5':
-						CurrentTheme = ThemeSkittles
+						CurrentTheme = ThemeWhite
 						tui.screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
 					case '6':
 						CurrentTheme = ThemeDark
@@ -1674,6 +2408,12 @@ func (tui *TUI) HandleInput() {
 						tui.screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
 					case '8':
 						CurrentTheme = ThemeAmber
+						tui.screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
+					case '9':
+						CurrentTheme = ThemeNeon
+						tui.screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
+					case '0':
+						CurrentTheme = ThemeRainbow
 						tui.screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
 					}
 				}
@@ -1689,46 +2429,58 @@ func (tui *TUI) HandleInput() {
 func (tui *TUI) cycleTheme(key rune) {
 	switch key {
 	case '1':
-		CurrentTheme = ThemeMatrix
-	case '2':
-		CurrentTheme = ThemeRainbow
-	case '3':
-		CurrentTheme = ThemeCyber
-	case '4':
-		CurrentTheme = ThemeBlood
-	case '5':
 		CurrentTheme = ThemeSkittles
+	case '2':
+		CurrentTheme = ThemeBlood
+	case '3':
+		CurrentTheme = ThemeMatrix
+	case '4':
+		CurrentTheme = ThemeCyber
+	case '5':
+		CurrentTheme = ThemeWhite
 	case '6':
 		CurrentTheme = ThemeDark
 	case '7':
 		CurrentTheme = ThemePurple
 	case '8':
 		CurrentTheme = ThemeAmber
+	case '9':
+		CurrentTheme = ThemeNeon
+	case '0':
+		CurrentTheme = ThemeRainbow
 	default:
-		// Cycle through themes
+		// Cycle through themes in new order
 		switch CurrentTheme.Name {
-		case "MATRIX":
-			CurrentTheme = ThemeRainbow
-		case "RAINBOW":
-			CurrentTheme = ThemeCyber
-		case "CYBER":
+		case "SKITTLES":
 			CurrentTheme = ThemeBlood
 		case "BLOOD":
-			CurrentTheme = ThemeSkittles
-		case "SKITTLES":
+			CurrentTheme = ThemeMatrix
+		case "MATRIX":
+			CurrentTheme = ThemeCyber
+		case "CYBER":
+			CurrentTheme = ThemeWhite
+		case "WHITE":
 			CurrentTheme = ThemeDark
 		case "DARK":
 			CurrentTheme = ThemePurple
 		case "PURPLE":
 			CurrentTheme = ThemeAmber
 		case "AMBER":
-			CurrentTheme = ThemeMatrix
+			CurrentTheme = ThemeNeon
+		case "NEON":
+			CurrentTheme = ThemeRainbow
+		case "RAINBOW":
+			CurrentTheme = ThemeSkittles
 		}
 	}
 	tui.screen.SetStyle(tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text))
 }
 
 func (tui *TUI) Run() {
+	// Clear screen and render immediately on startup
+	tui.screen.Clear()
+	tui.Render()
+
 	go tui.HandleInput()
 
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -1736,6 +2488,34 @@ func (tui *TUI) Run() {
 
 	for tui.running {
 		<-ticker.C
+
+		// Check if scan is currently active
+		completed := atomic.LoadInt64(&tui.scanner.LiveStats.CompletedRequests)
+		total := tui.scanner.LiveStats.TotalRequests
+		scanActive := (completed > 0 && completed < total) || (total > 0 && completed == 0)
+
+		// Enter sync mode if scan is active
+		if scanActive && !tui.mazeSyncMode {
+			tui.mazeSyncMode = true
+		}
+
+		// Exit sync mode when scan completes and set end time
+		if !scanActive && tui.mazeSyncMode {
+			tui.mazeSyncMode = false
+			// Set scan end time if not already set
+			if tui.scanner.LiveStats.EndTime.IsZero() && completed >= total && total > 0 {
+				tui.scanner.LiveStats.mu.Lock()
+				tui.scanner.LiveStats.EndTime = time.Now()
+				tui.scanner.LiveStats.mu.Unlock()
+			}
+		}
+
+		// Only advance maze animation after splash screen is done
+		if !tui.showSplash {
+			tui.stepMazeAnimation()
+		}
+
+		tui.lastScanActive = scanActive
 		tui.Render()
 	}
 }
@@ -1770,6 +2550,15 @@ func (tui *TUI) submitInput() {
 	// Update scanner's BaseURL
 	tui.scanner.BaseURL = strings.TrimRight(targetURL, "/")
 
+	// Reset maze animation for new search
+	tui.initMaze()
+	tui.scanHasEverRun = true
+
+	// Reset cancel flag for new scan
+	tui.scanner.cancelMutex.Lock()
+	tui.scanner.cancelScan = false
+	tui.scanner.cancelMutex.Unlock()
+
 	// Reset statistics
 	tui.scanner.Stats = &Statistics{
 		RedirectTargets: make(map[string]int),
@@ -1777,6 +2566,7 @@ func (tui *TUI) submitInput() {
 	}
 	tui.scanner.LiveStats = &LiveStats{
 		StartTime:  time.Now(),
+		EndTime:    time.Time{}, // Reset to zero (scan not finished)
 		LastUpdate: time.Now(),
 	}
 	tui.scanner.lastResults = make([]*ScanResult, 0, 50)
@@ -2110,11 +2900,32 @@ func (s *Scanner) ScanAll(paths []string, tui *TUI) []*ScanResult {
 	var resultsMutex sync.Mutex
 
 	for _, p := range paths {
+		// Check if scan has been cancelled
+		s.cancelMutex.Lock()
+		cancelled := s.cancelScan
+		s.cancelMutex.Unlock()
+
+		if cancelled {
+			// Mark remaining requests as completed so progress shows 100%
+			atomic.AddInt64(&s.LiveStats.CompletedRequests, int64(totalPaths)-atomic.LoadInt64(&s.LiveStats.CompletedRequests))
+			break
+		}
+
 		wg.Add(1)
 		go func(path string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+
+			// Check cancellation before processing
+			s.cancelMutex.Lock()
+			cancelled := s.cancelScan
+			s.cancelMutex.Unlock()
+
+			if cancelled {
+				atomic.AddInt64(&s.LiveStats.CompletedRequests, 1)
+				return
+			}
 
 			result, _ := s.ScanPath(path)
 			if result != nil {

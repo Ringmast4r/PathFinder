@@ -1,8 +1,8 @@
 # PathFinder - Technical Architecture & Implementation Notes
 
-**Version:** 3.0.0 - DEATH STAR EDITION
+**Version:** 1.0.1
 **Last Updated:** 2025-10-12
-**Status:** ✅ PRODUCTION READY - FEATURE COMPLETE
+**Status:** ✅ PRODUCTION READY - Adaptive Splash Screen Update
 
 ---
 
@@ -11,17 +11,19 @@
 This version represents a **fully featured, production-ready pentest tool** with all major features implemented and tested.
 
 ### What Works Right Now
-- ✅ **Splash Screen:** /PATHFINDER ASCII art with diagonal slash, trickle animation, 3.5s hold
+- ✅ **Adaptive Splash Screen:** 7 logo variants that scale to any terminal size, diagonal slash preserved, zero wrapping
 - ✅ **TUI Dashboard:** Full-screen interface with colorful bordered boxes
-- ✅ **Themes:** 8 themes (Matrix, Rainbow, Cyber, Blood, Skittles, Dark, Purple, Amber)
-- ✅ **Function Keys:** F1=Cycle, F3=Globe, F4=Config, F5=Export, ?=Help
+- ✅ **Themes:** 10 themes (Matrix, Rainbow, Cyber, Blood, Skittles, Dark, Purple, Amber, White, Neon)
+- ✅ **BFS Pathfinding Maze:** Real-time animated breadth-first search visualization synced with scan progress
+- ✅ **Function Keys:** F1=Help, F2=Privacy Toggle, F3=Skittles Regen, F4=Config, F5=Export, F6=Maze Reset
+- ✅ **Theme Controls:** Backtick(`)=Cycle themes, 1-9/0=Direct selection
 - ✅ **Config Menu:** Interactive settings adjustment (F4)
-- ✅ **Help Screen:** Built-in comprehensive documentation (?)
+- ✅ **Help Screen:** Built-in comprehensive documentation (F1 or ?)
 - ✅ **Executive Export:** Professional pentest reports (F5)
 - ✅ **Dynamic Input:** Enter URLs directly in TUI
-- ✅ **Globe Mode:** 3D spinning globe, 30-second rotation
+- ✅ **Globe Mode:** 3D spinning globe, 30-second rotation (easter egg key)
 - ✅ **Live Results:** Real-time scanning with scrollable results (↑/↓)
-- ✅ **Network Info:** Local interface, IP, MAC, subnet, gateway display
+- ✅ **Network Info:** Local interface, IP, MAC, subnet, gateway display (F2 privacy toggle)
 - ✅ **Concurrent Scanning:** Thread-safe with atomic operations
 
 ---
@@ -32,16 +34,17 @@ PathFinder is a professional web path discovery tool with a full TUI dashboard b
 
 ### Core Components
 
-1. **Splash Screen** - Animated /PATHFINDER logo with trickle effect
-2. **TUI Dashboard** - Full-screen terminal interface with 8 themes
+1. **Adaptive Splash Screen** - 7 responsive logo variants with dynamic selection and trickle animation
+2. **TUI Dashboard** - Full-screen terminal interface with 10 themes
 3. **Scanner Engine** - Concurrent HTTP path scanning with redirect tracking
-4. **Globe Visualization** - 3D ASCII art spinning globe (F3)
-5. **Config Menu** - Interactive settings adjustment (F4)
-6. **Help System** - Comprehensive built-in documentation (?)
-7. **Report Generator** - Professional pentest executive summaries (F5)
-8. **Local Network Info** - Interface details, IPs, MAC, gateway
-9. **Input System** - Dynamic URL/domain input with live scanning
-10. **Results Scroller** - Navigate thousands of results with arrow keys
+4. **BFS Pathfinding Maze** - Real-time animated breadth-first search synced with scan progress
+5. **Globe Visualization** - 3D ASCII art spinning globe (F3)
+6. **Config Menu** - Interactive settings adjustment (F4)
+7. **Help System** - Comprehensive built-in documentation (?)
+8. **Report Generator** - Professional pentest executive summaries (F5)
+9. **Local Network Info** - Interface details, IPs, MAC, gateway (F7 privacy toggle)
+10. **Input System** - Dynamic URL/domain input with live scanning
+11. **Results Scroller** - Navigate thousands of results with arrow keys
 
 ---
 
@@ -94,11 +97,132 @@ type TUI struct {
 
 ---
 
+## Adaptive Splash Screen System
+
+### Overview
+The splash screen uses dynamic logo selection to display the best-fitting /PATHFINDER logo for any terminal size. Features 7 logo variants from full ASCII art (110 chars) to minimal icon (2 chars), ensuring perfect rendering without wrapping on any screen size.
+
+### Logo Variants (`main.go:1037-1111`)
+
+**Seven progressively smaller logos:**
+
+1. **logoFull** (~110 chars) - Full ASCII art with detailed /PATHFINDER lettering
+   - Displays on terminals ≥114 chars wide
+   - Classic diagonal slash effect with full banner text
+
+2. **logoCompact** (~35 chars) - Compact ASCII art
+   - Displays on terminals 39-113 chars wide
+   - Two-line PATH/FINDER layout with ASCII styling
+
+3. **logoCompactLine** (20 chars) - Single line with slashes
+   - Format: `// PATHFINDER v1.0.1`
+   - Displays on terminals 24-38 chars wide
+
+4. **logoSmall** (15 chars) - Compact diagonal slashes
+   - Two lines: `  // PATHFINDER` and ` //  v1.0.1` and `//`
+   - Displays on terminals 19-23 chars wide
+
+5. **logoMedium** (13 chars) - Diagonal slashes with PATH/FINDER
+   - Three lines: `   //  PATH`, `  //   FINDER`, ` //    v1.0.1`, `//`
+   - Displays on terminals 17-18 chars wide
+
+6. **logoMinimal** (10 chars) - Just brand name
+   - Single word: `PATHFINDER`
+   - Displays on terminals 14-16 chars wide
+
+7. **logoTiny** (2 chars) - Icon only
+   - Just the slashes: `//`
+   - Displays on terminals <14 chars wide
+
+### Dynamic Selection Algorithm (`main.go:1124-1142`)
+
+**Width calculation with minimal safety margin:**
+```go
+safeWidth := tui.width - 4  // Leave 2 chars on each side for centering
+```
+
+**Selection cascades from largest to smallest:**
+```go
+if getMaxWidth(logoFull) <= safeWidth {
+    logo = logoFull
+} else if getMaxWidth(logoCompact) <= safeWidth {
+    logo = logoCompact
+} else if getMaxWidth(logoCompactLine) <= safeWidth {
+    logo = logoCompactLine
+} // ... continues through all variants
+```
+
+**Helper function calculates actual logo width:**
+```go
+getMaxWidth := func(logo []string) int {
+    maxLen := 0
+    for _, line := range logo {
+        if len(line) > maxLen {
+            maxLen = len(line)
+        }
+    }
+    return maxLen
+}
+```
+
+### Rendering with Wrapping Protection (`main.go:1168-1189`)
+
+**Smart centering:**
+```go
+x := (tui.width - len(line)) / 2
+if x < 1 {
+    x = 1  // Always leave 1 char margin
+}
+```
+
+**Skip lines that don't fit:**
+```go
+if x+len(line) > tui.width {
+    continue  // Skip lines that would wrap
+}
+```
+
+**Bounds checking on every character:**
+```go
+if x+j < tui.width && y < tui.height {
+    tui.screen.SetContent(x+j, y, ch, nil, style)
+}
+```
+
+### Trickle Animation
+- Character-by-character reveal effect (0.0-1.0 progress)
+- 3.5 second hold after complete (1.0-2.5 progress)
+- Smooth transition at 20 FPS (50ms per frame)
+- Works with all logo sizes
+
+### Immediate Screen Takeover (`main.go:587-588, 2480-2482`)
+
+**On TUI initialization:**
+```go
+screen.Clear()
+screen.Show()  // Force immediate display
+```
+
+**On Run() start:**
+```go
+tui.screen.Clear()
+tui.Render()  // Immediate first frame
+```
+
+### Technical Highlights
+- **Zero wrapping guarantee** - Logos never extend past screen edge
+- **Adaptive to terminal resize** - Recalculates on every render
+- **Diagonal slash preservation** - "/" effect visible at all sizes
+- **Professional appearance** - Clean, centered, no artifacts
+- **Wide compatibility** - Works on 10-char to 200+ char terminals
+
+---
+
 ## Dashboard Layout (Updated)
 
 ```
 ╔═══════════════════════════════════════════════════════════════════╗
-║  PATHFINDER v3.0.0 - Web Path Discovery Tool                     ║
+║  PATHFINDER v1.0.0 - Web Path Discovery Tool                     ║
 ║                by ringmast4r                                       ║  (pulsing red)
 ╚═══════════════════════════════════════════════════════════════════╝
 
@@ -134,14 +258,14 @@ type TUI struct {
 ╚════════════════════════════════════╝
 
 ╔═══════════════════════════════════════════════════════════════════╗
-║  Theme: BLOOD | F1: Cycle | F3: Globe | F4: Config | F5: Export  ║
-║  ?: Help | Q: Quit                                                ║
+║  Theme: BLOOD | F1: Help | `: Cycle | F4: Config | F5: Export    ║
+║  F6: Maze | F2: Privacy | Q: Quit                                ║
 ╚═══════════════════════════════════════════════════════════════════╝
 ```
 
 ---
 
-## Theme System (8 Themes)
+## Theme System (10 Themes)
 
 ### Available Themes
 
@@ -153,6 +277,8 @@ type TUI struct {
 6. **DARK** (Light Mode) - White background, dark text `main.go:120-131`
 7. **PURPLE** (Purple Gradient) - Purple aesthetic `main.go:133-144`
 8. **AMBER** (Orange/Amber) - Amber terminal theme `main.go:146-157`
+9. **WHITE** (White/Gray) - Clean white theme
+10. **NEON** (Pink/Cyan) - Bright neon colors
 
 ### Default Theme
 ```go
@@ -177,13 +303,95 @@ type Theme struct {
 
 ---
 
+## BFS Pathfinding Maze Animation
+
+### Overview
+Real-time animated breadth-first search (BFS) visualization that syncs with scan progress. Located below the LOCAL NETWORK INFO box, this feature demonstrates the pathfinding algorithm while providing visual feedback on scan completion.
+
+**Unique Feature:** Every maze is randomly generated with different wall positions, so the solution path is different every time! Watch the BFS algorithm explore and solve a completely new puzzle with each iteration.
+
+### Animation Components
+1. **Green 'S'** - Start position (top-left corner)
+2. **Red 'X'** - End position / target (bottom-right corner)
+3. **Blue dots (·)** - BFS exploration phase (searching for paths)
+4. **Yellow stars (*)** - Solution path (found route from S to X)
+
+### Sync Modes
+
+**Idle Mode** (No scan running):
+- Animation auto-loops continuously
+- ~10-15 second cycle time
+- Blue exploration takes ~60-70% of animation
+- Yellow path drawing takes ~30-40% of animation
+- Press F6 to reset/regenerate maze
+
+**Scan Mode** (Active scan):
+- Animation syncs with scan completion percentage
+- **Animation speed matches actual scan speed (REALISTIC)**
+  - Fast scan (3 sec) = Fast animation (3 sec)
+  - Slow scan (60 sec) = Slow animation (60 sec)
+- Blue exploration corresponds to scan progress (0-80%)
+- Yellow path drawing corresponds to final phase (80-100%)
+- Visual completion matches 100% scan completion
+- Displays "Pathfinding... X% (scan: Y%)"
+- Executes all animation frames up to current scan percentage instantly
+- 50ms refresh rate keeps visual updates smooth
+
+### Technical Implementation
+
+**Frame-Based Animation:**
+- Pre-calculates entire BFS solution at maze initialization
+- Stores sequence as array of function closures
+- Total frames: ~10,000-15,000 (depending on maze size)
+  - Exploration: 20 frames per cell
+  - Neighbor discovery: 10 frames per neighbor
+  - Path drawing: 120 frames per path cell
+  - Padding: ~2.5% for sync buffer
+
+**Maze Structure (main.go:544-560):**
+```go
+// Pathfinding maze animation fields
+mazeWidth              int
+mazeHeight             int
+maze                   [][]rune
+mazeVisited            [][]bool
+mazeStart              Point      // Green 'S'
+mazeEnd                Point      // Red 'X'
+mazeAnimating          bool
+mazeComplete           bool
+mazeSyncMode           bool       // Sync with scan vs free-run
+mazeAnimationSequence  []func()   // Pre-calculated frames
+mazeCurrentStep        int
+mazeTotalSolutionSteps int
+scanHasEverRun         bool       // Auto-loop only if no scan ran
+```
+
+**Key Functions:**
+- `initMaze()` - Generates random maze with random walls and pre-calculates BFS animation
+  - Creates unique maze every time (random wall positions)
+  - Runs complete BFS to find optimal path
+  - Pre-calculates all animation frames (10,000-15,000)
+  - Guarantees solution exists (always finds path from S to X)
+- `stepMazeAnimation()` - Advances animation frame(s) based on mode
+- `renderMaze()` - Draws current maze state to screen
+
+### Privacy Toggle (F2)
+- Press F2 to hide LOCAL NETWORK INFO box
+- Maze moves up to fill the space
+- Useful for screenshots, recordings, OpSec scenarios
+- Network info is hidden but maze remains visible
+
+---
+
 ## Keyboard Controls (Complete Reference)
 
 ### Function Keys
-- **F1** - Cycle themes (Matrix → Rainbow → Cyber → Blood → Skittles → Dark → Purple → Amber)
-- **F3** - Toggle Globe Mode (3D spinning globe)
+- **F1** - Toggle Help Screen (INDUSTRY STANDARD)
+- **F2** - Toggle local network info visibility (OpSec/screenshot mode)
+- **F3** - Regenerate Skittles theme with new random colors
 - **F4** - Open Config Menu (adjust settings interactively)
 - **F5** - Export Executive Summary Report (pentest documentation)
+- **F6** - Reset pathfinding maze (generate new random maze)
 
 ### Navigation Keys
 - **↑ (Up Arrow)** - Scroll results up
@@ -200,14 +408,23 @@ type Theme struct {
 - **6** - Dark theme (light mode)
 - **7** - Purple theme
 - **8** - Amber theme
+- **9** - White theme
+- **0** - Neon theme (bright pink/cyan)
+
+### Theme Controls
+- **`** (backtick) - Cycle through all themes
+- **1-9, 0** - Direct theme selection (1=Skittles, 2=Blood, etc.)
 
 ### Text Input
 - **Enter** - Activate/deactivate input field OR submit URL
 - **Backspace** - Delete last character in input field
-- **?** - Toggle Help Screen
+- **?** - Toggle Help Screen (alternative to F1)
 - **Q** - Quit application
 - **Esc** - Close menus OR quit application
 - **Ctrl+C** - Force quit
+
+### Easter Eggs
+- Hidden globe visualization - Find the key! (Hint: it's on every keyboard)
 
 ---
 
@@ -513,15 +730,17 @@ progressBar := "[ SCANNING "
 
 ```
 PathFinder/
-├── main.go                      # All code (2500+ lines)
+├── main.go                      # All code (8000+ lines)
 ├── go.mod                       # Go module definition
 ├── go.sum                       # Dependency checksums
 ├── build.bat                    # Cross-platform build script
-├── wordlist.txt                 # Default wordlist (167 paths)
+├── SCAN.bat                     # Quick scan launcher
+├── wordlist.txt                 # Default wordlist (719 curated paths)
 ├── pathfinder.exe               # Windows binary
 ├── pathfinder-linux             # Linux binary
 ├── pathfinder-mac               # macOS binary
 ├── README.md                    # User documentation
+├── CHANGELOG.md                 # Version history and updates
 ├── ROADMAP.md                   # Development roadmap
 ├── TECHNICAL_NOTES.md           # This file
 └── THEME_ENHANCEMENTS.md        # Theme system docs
@@ -531,14 +750,23 @@ PathFinder/
 
 ## Current Feature Status
 
-### ✅ Implemented & Tested (v3.0.0)
-- [x] Splash screen with /PATHFINDER ASCII art + trickle animation
-- [x] TUI dashboard with colorful borders and 8 themes
-- [x] F1: Cycle through 8 themes
-- [x] F3: Toggle Globe Mode (3D spinning Earth)
+### ✅ Implemented & Tested (v1.0.1)
+- [x] Adaptive splash screen with 7 responsive logo variants
+- [x] TUI dashboard with colorful borders and 10 themes
+- [x] BFS pathfinding maze animation with random mazes
+  - [x] Realistic scan-synced animation speed
+  - [x] Auto-loop in idle mode
+  - [x] Blue exploration and yellow solution path
+- [x] F1: Help Screen (industry standard)
+- [x] F2: Privacy toggle - hide network info (OpSec mode)
+- [x] F3: Regenerate Skittles colors (dedicated key)
 - [x] F4: Interactive Config Menu (concurrency, rate limit, timeout, method)
 - [x] F5: Export Executive Summary (pentest reports with timestamps)
-- [x] ?: Built-in Help System (comprehensive documentation overlay)
+- [x] F6: Reset/regenerate pathfinding maze
+- [x] Backtick (`): Cycle through all 10 themes
+- [x] Backslash (\): Toggle Globe Mode (3D spinning Earth) - EASTER EGG
+- [x] 1-9, 0: Direct theme selection
+- [x] ?: Built-in Help System (alternative to F1)
 - [x] Enter: Dynamic URL input with submission
 - [x] ↑/↓: Scroll through live results
 - [x] Local Network Info display (interface, IP, subnet, MAC, gateway)
@@ -567,20 +795,28 @@ PathFinder/
 ## Testing Results
 
 ### ✅ All Features Tested and Working
-- ✅ Splash screen animation + transition
-- ✅ All 8 themes functional
+- ✅ Splash screen animation + transition (no subtitle)
+- ✅ All 10 themes functional (including White and Neon)
+- ✅ BFS pathfinding maze animation with realistic scan-synced speed
+- ✅ F1 opens help screen (industry standard)
+- ✅ F2 privacy toggle hides network info (OpSec mode)
+- ✅ F3 regenerates Skittles colors (dedicated key)
 - ✅ F4 config menu adjusts settings in real-time
 - ✅ F5 exports complete pentest reports
-- ✅ Help screen shows comprehensive docs
+- ✅ F6 resets/regenerates maze
+- ✅ Backtick (`) cycles through themes
+- ✅ Backslash (\) toggles globe mode (easter egg)
+- ✅ Help screen shows comprehensive docs (F1 or ?)
 - ✅ Results scroll smoothly with ↑/↓
 - ✅ Input field accepts URLs and starts scans
 - ✅ Local network info displays correctly
 - ✅ Globe mode rotates at correct speed/direction
 - ✅ Statistics properly aligned in columns
-- ✅ All keyboard controls responsive
+- ✅ All keyboard controls responsive (1-9, 0 for direct theme selection)
 - ✅ Thread-safe concurrent scanning
 - ✅ Redirect chains tracked completely
 - ✅ Wildcard detection works
+- ✅ Animation speed matches scan speed (fast/slow scans)
 
 ---
 
@@ -636,27 +872,47 @@ require github.com/gdamore/tcell/v2 v2.9.0
 
 ## Version History
 
-### v3.0.0 - DEATH STAR EDITION (2025-10-12) - ✅ CURRENT
-- ✅ **PRODUCTION READY - FEATURE COMPLETE**
-- Added 3 new themes (Dark, Purple, Amber) - total 8 themes
-- Implemented F4 interactive config menu
-- Implemented F5 executive summary export for pentest reports
-- Implemented ? help screen with comprehensive docs
-- Added local network info display (interface, IP, subnet, MAC, gateway)
-- Added ↑/↓ arrow key scrolling for live results
-- Fixed statistics alignment (removed Unicode emojis)
-- Improved input field with white pulsing glow
-- Added scroll indicator for results
-- Enhanced report generation with timestamps
-- Made dynamic URL input fully functional
-- **STATUS:** All major features complete and tested
+### v1.0.1 (2025-10-12) - ✅ ADAPTIVE SPLASH SCREEN UPDATE
+- ✅ **Fully Adaptive Logo Rendering** - 7 responsive logo variants
+  - Dynamic logo selection based on terminal width
+  - Logo variants: Full ASCII (110 chars) → Compact ASCII (35 chars) → Single-line (20 chars) → Diagonal slashes (15/13 chars) → Minimal (10 chars) → Icon (2 chars)
+  - Diagonal slash "/" effect preserved at all sizes
+  - Zero wrapping guarantee on any terminal size
+- ✅ **Immediate Screen Takeover** - TUI clears and renders instantly on startup
+- ✅ **Smart Centering with Wrapping Protection** - Logos center when they fit, skip lines that would wrap
+- ✅ **Wide Compatibility** - Works on 10-char to 200+ char terminals
+- Bug fixes: Fixed logo wrapping at normal CMD sizes, removed overly conservative width checks, corrected boundary conditions
 
-### v3.0.1-CHECKPOINT (2025-10-11)
-- Splash screen implementation
-- 5 themes with Skittles random colors
-- F1/F2/F3 function keys
-- Input field foundation
-- Globe mode integration
+### v1.0.0 (2025-10-12) - ✅ INITIAL PUBLIC RELEASE
+- ✅ **PRODUCTION READY - FIRST PUBLIC VERSION**
+- 10 color themes (Matrix, Rainbow, Cyber, Blood, Skittles, Dark, Purple, Amber, White, Neon)
+- BFS pathfinding maze animation with realistic scan-synced speed
+  - Random maze generation every time
+  - Blue exploration dots and yellow solution path
+  - Animation speed matches actual scan speed
+- Industry-standard hotkey remapping:
+  - F1: Help screen (universal standard)
+  - F2: Privacy toggle (OpSec mode, moved from F7)
+  - F3: Skittles regeneration (dedicated key)
+  - F4: Config menu
+  - F5: Export report
+  - F6: Maze reset
+  - Backtick (`): Theme cycling (promoted from F1)
+  - Backslash (\): Globe visualization (easter egg, hidden)
+- Interactive configuration menu (F4)
+- Executive summary export for pentest reports (F5)
+- Maze reset/regeneration (F6)
+- Built-in help system (F1 or ?)
+- Local network info display (interface, IP, MAC, subnet, gateway)
+- Live results scrolling with arrow keys (↑/↓)
+- Direct theme selection (number keys 1-9, 0)
+- Dynamic URL input system
+- Real-time TUI dashboard with splash screen
+- Thread-safe concurrent HTTP scanning
+- Redirect chain tracking
+- Wildcard detection
+- Content hash comparison
+- **STATUS:** All major features complete and tested
 
 ---
 
@@ -692,14 +948,14 @@ pathfinder.exe -target https://example.com \
 ## Contact & Support
 
 **Project:** PathFinder - Web Path Discovery Tool
-**Author:** Ringmast4r
-**Version:** 3.0.0 - DEATH STAR EDITION
-**Status:** ✅ Production Ready - Feature Complete
+**Author:** ringmast4r
+**Version:** 1.0.1
+**Status:** ✅ Production Ready - Adaptive Splash Screen Update
 
 For issues or questions, refer to README.md, ROADMAP.md, or this document.
 
 ---
 
-**🎯 PRODUCTION READY - ALL FEATURES TESTED AND WORKING**
+**🎯 PRODUCTION READY - ADAPTIVE SPLASH SCREEN UPDATE**
 
-*End of Technical Notes - v3.0.0*
+*End of Technical Notes - v1.0.1*

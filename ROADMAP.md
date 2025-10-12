@@ -1,7 +1,7 @@
 # PathFinder - Development Roadmap
 
 ## 🎯 Current Status
-PathFinder v3.0.0 - Fully functional web path discovery tool with TUI, multiple themes, live results, and executive summary export.
+PathFinder v1.0.0 - Fully functional web path discovery tool with TUI, 10 themes, BFS pathfinding animation, live results, and executive summary export.
 
 ---
 
@@ -135,10 +135,11 @@ PathFinder v3.0.0 - Fully functional web path discovery tool with TUI, multiple 
 ## ✅ COMPLETED FEATURES
 
 - [x] Real-time TUI with live results
-- [x] 8 color themes (Matrix, Rainbow, Cyber, Blood, Skittles, Dark, Purple, Amber)
-- [x] Globe visualization mode
+- [x] 10 color themes (Matrix, Rainbow, Cyber, Blood, Skittles, Dark, Purple, Amber, White, Neon)
+- [x] BFS pathfinding maze animation (synced with scan progress)
+- [x] Globe visualization mode (F3)
 - [x] Executive summary export (F5)
-- [x] Local network information display
+- [x] Local network information display (with F7 privacy toggle)
 - [x] Wildcard detection and filtering
 - [x] Redirect chain tracking
 - [x] Interactive configuration menu (F4)
@@ -153,6 +154,8 @@ PathFinder v3.0.0 - Fully functional web path discovery tool with TUI, multiple 
 - [x] Content length filtering
 - [x] Response time tracking
 - [x] JSON/CSV export options
+- [x] Theme quick-switch (1-9, 0 keys)
+- [x] Maze reset (F6)
 
 ---
 
