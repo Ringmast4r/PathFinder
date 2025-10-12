@@ -1,0 +1,33 @@
+# Binaries
+*.exe
+pathfinder
+pathfinder-*
+
+# Go build artifacts
+*.test
+*.out
+
+# Dependency directories
+vendor/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.log
+nul
+
+# Output files
+*.json
+*.csv
+results/
