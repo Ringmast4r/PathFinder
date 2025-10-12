@@ -10,6 +10,16 @@ Built by **ringmast4r** for professional penetration testing and security assess
 
 ---
 
+## Screenshots
+
+### Adaptive Splash Screen
+![PathFinder Splash Screen](screenshots/splash.png)
+
+### Full TUI Dashboard
+![PathFinder TUI Dashboard](screenshots/dashboard.png)
+
+---
+
 ## What Makes PathFinder Different
 
 ### Visual Intelligence
