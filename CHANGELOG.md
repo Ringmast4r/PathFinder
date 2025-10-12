@@ -24,6 +24,11 @@
 - Removed overly conservative width checking that prevented logos from displaying
 - Corrected boundary checking to allow logos that fit exactly
 
+### 🧹 Repository Cleanup
+- Removed report files from repository (not needed in version control)
+- Updated .gitignore to exclude all PathFinder_Report_*.txt files
+- Cleaned up gitignore formatting for better maintainability
+
 ---
 
 ## Version 1.0.0 (2025-10-12) - Initial Public Release
