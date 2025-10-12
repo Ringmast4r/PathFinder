@@ -222,7 +222,7 @@ tui.Render()  // Immediate first frame
 
 ```
 ╔═══════════════════════════════════════════════════════════════════╗
-║  PATHFINDER v1.0.0 - Web Path Discovery Tool                     ║
+║  PATHFINDER v1.0.1 - Web Path Discovery Tool                     ║
 ║                by ringmast4r                                       ║  (pulsing red)
 ╚═══════════════════════════════════════════════════════════════════╝
 
