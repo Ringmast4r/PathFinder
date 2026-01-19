@@ -14,7 +14,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +26,25 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 )
+
+// getClipboard returns the clipboard content (cross-platform)
+func getClipboard() string {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("powershell", "-command", "Get-Clipboard")
+	case "darwin":
+		cmd = exec.Command("pbpaste")
+	default: // linux
+		cmd = exec.Command("xclip", "-selection", "clipboard", "-o")
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	// Trim whitespace and newlines
+	return strings.TrimSpace(string(out))
+}
 
 const (
 	Version            = "1.0.1"
@@ -212,6 +233,7 @@ type LiveStats struct {
 	TotalRequests     int64
 	CompletedRequests int64
 	Direct200s        int64
+	Redirect200s      int64 // 200 responses after redirect
 	Redirects         int64
 	Errors            int64
 	Protected         int64
@@ -225,6 +247,7 @@ type Statistics struct {
 	mu              sync.Mutex
 	TotalScanned    int
 	Direct200s      []*ScanResult
+	Redirect200s    []*ScanResult // 200 responses after redirect (HITS)
 	Redirects       []*ScanResult
 	RedirectTargets map[string]int
 	ContentHashes   map[string][]*ScanResult
@@ -1525,14 +1548,17 @@ func (tui *TUI) renderDashboard() {
 	tui.progressBarFrame++
 
 	// Statistics box
-	tui.drawBox(2, 15, titleWidth/2-1, 7, "STATISTICS", statsBoxStyle)
+	tui.drawBox(2, 15, titleWidth/2-1, 8, "STATISTICS", statsBoxStyle)
 	direct200s := atomic.LoadInt64(&tui.scanner.LiveStats.Direct200s)
+	redirect200s := atomic.LoadInt64(&tui.scanner.LiveStats.Redirect200s)
 	redirects := atomic.LoadInt64(&tui.scanner.LiveStats.Redirects)
 	protected := atomic.LoadInt64(&tui.scanner.LiveStats.Protected)
 	errors := atomic.LoadInt64(&tui.scanner.LiveStats.Errors)
 
-	stat1 := fmt.Sprintf("%-20s %6d", "Direct 200s:", direct200s)
-	tui.drawText(4, 16, stat1, tcell.StyleDefault.Foreground(CurrentTheme.Success))
+	// Combined HITS = Direct 200s + Redirect 200s (what gobuster/ffuf show)
+	totalHits := direct200s + redirect200s
+	stat1 := fmt.Sprintf("%-20s %6d", "HITS (200s):", totalHits)
+	tui.drawText(4, 16, stat1, tcell.StyleDefault.Foreground(CurrentTheme.Success).Bold(true))
 
 	stat2 := fmt.Sprintf("%-20s %6d", "Redirects:", redirects)
 	tui.drawText(4, 17, stat2, tcell.StyleDefault.Foreground(CurrentTheme.Warning))
@@ -1618,10 +1644,17 @@ func (tui *TUI) renderDashboard() {
 		var label string
 		color := CurrentTheme.Text
 
+		// Determine label and color based on result type
 		if result.IsDirect200 {
+			// Direct 200 (no redirect)
+			label = "HIT:"
+			color = CurrentTheme.Success
+		} else if len(result.RedirectChain) > 0 && result.FinalStatus == 200 {
+			// 200 via redirect - THIS IS A HIT (like gobuster/ffuf)
 			label = "HIT:"
 			color = CurrentTheme.Success
 		} else if len(result.RedirectChain) > 0 {
+			// Redirect to non-200
 			label = "REDIRECT:"
 			color = CurrentTheme.Warning
 		} else if result.FinalStatus == 403 || result.FinalStatus == 401 {
@@ -1635,8 +1668,34 @@ func (tui *TUI) renderDashboard() {
 			color = CurrentTheme.Danger
 		}
 
-		path := truncateString(result.OriginalPath, titleWidth/2-25)
-		line := fmt.Sprintf("%-10s [%d] %s", label, result.FinalStatus, path)
+		// Build the display line
+		var line string
+		availableWidth := titleWidth/2 - 20
+
+		if len(result.RedirectChain) > 0 && result.FinalURL != "" {
+			// Show redirect: /path → final-destination.com/path
+			// Extract just the host+path from final URL for cleaner display
+			finalDisplay := result.FinalURL
+			if strings.HasPrefix(finalDisplay, "https://") {
+				finalDisplay = finalDisplay[8:]
+			} else if strings.HasPrefix(finalDisplay, "http://") {
+				finalDisplay = finalDisplay[7:]
+			}
+
+			// Calculate how much space we have for both parts
+			pathWidth := availableWidth / 3
+			finalWidth := availableWidth - pathWidth - 4 // 4 for " → "
+
+			origPath := truncateString(result.OriginalPath, pathWidth)
+			finalPath := truncateString(finalDisplay, finalWidth)
+
+			line = fmt.Sprintf("%-10s [%d] %s → %s", label, result.FinalStatus, origPath, finalPath)
+		} else {
+			// No redirect - just show the path
+			path := truncateString(result.OriginalPath, availableWidth)
+			line = fmt.Sprintf("%-10s [%d] %s", label, result.FinalStatus, path)
+		}
+
 		tui.drawText(titleWidth/2+4, 10+i-startIdx, line, tcell.StyleDefault.Foreground(color))
 	}
 
@@ -1724,24 +1783,28 @@ func (tui *TUI) exportExecutiveSummary() {
 
 	completed := atomic.LoadInt64(&tui.scanner.LiveStats.CompletedRequests)
 	direct200s := atomic.LoadInt64(&tui.scanner.LiveStats.Direct200s)
+	redirect200s := atomic.LoadInt64(&tui.scanner.LiveStats.Redirect200s)
 	redirects := atomic.LoadInt64(&tui.scanner.LiveStats.Redirects)
 	protected := atomic.LoadInt64(&tui.scanner.LiveStats.Protected)
 	errors := atomic.LoadInt64(&tui.scanner.LiveStats.Errors)
 	avgSpeed := tui.scanner.LiveStats.CurrentSpeed
+	totalHits := direct200s + redirect200s
 
 	report.WriteString(fmt.Sprintf("Total Requests:      %d\n", completed))
 	report.WriteString(fmt.Sprintf("Average Speed:       %.0f req/s\n\n", avgSpeed))
 
 	report.WriteString("FINDINGS BREAKDOWN:\n")
-	report.WriteString(fmt.Sprintf("  [✓] Direct 200s:     %d paths (Confirmed accessible resources)\n", direct200s))
+	report.WriteString(fmt.Sprintf("  [★] TOTAL HITS:      %d paths (All 200 OK responses)\n", totalHits))
+	report.WriteString(fmt.Sprintf("      - Direct 200s:   %d paths (No redirects)\n", direct200s))
+	report.WriteString(fmt.Sprintf("      - Via Redirect:  %d paths (200 after redirect)\n", redirect200s))
 	report.WriteString(fmt.Sprintf("  [→] Redirects:       %d paths (Redirection chains detected)\n", redirects))
 	report.WriteString(fmt.Sprintf("  [✗] Protected:       %d paths (Authentication/Authorization required)\n", protected))
 	report.WriteString(fmt.Sprintf("  [!] Errors:          %d paths (Network/timeout failures)\n\n", errors))
 
 	// Risk Assessment
 	report.WriteString("RISK ASSESSMENT:\n")
-	if direct200s > 0 {
-		report.WriteString(fmt.Sprintf("  • %d accessible paths discovered - Review for sensitive information disclosure\n", direct200s))
+	if totalHits > 0 {
+		report.WriteString(fmt.Sprintf("  • %d accessible paths discovered - Review for sensitive information disclosure\n", totalHits))
 	}
 	if protected > 0 {
 		report.WriteString(fmt.Sprintf("  • %d protected resources found - Verify authentication mechanisms\n", protected))
@@ -1778,16 +1841,49 @@ func (tui *TUI) exportExecutiveSummary() {
 		}
 	}
 
-	// Detailed Findings - Redirects
-	if len(tui.scanner.Stats.Redirects) > 0 {
+	// Detailed Findings - Redirect 200s (HITS via redirect - like gobuster/ffuf)
+	if len(tui.scanner.Stats.Redirect200s) > 0 {
+		report.WriteString("┌─────────────────────────────────────────────────────────────────────────────┐\n")
+		report.WriteString("│ DETAILED FINDINGS - HITS VIA REDIRECT (HIGH PRIORITY)                       │\n")
+		report.WriteString("└─────────────────────────────────────────────────────────────────────────────┘\n\n")
+		report.WriteString("The following paths returned HTTP 200 after redirect. These are accessible\n")
+		report.WriteString("resources (equivalent to gobuster/ffuf hits).\n\n")
+
+		sortedRedirect200s := make([]*ScanResult, len(tui.scanner.Stats.Redirect200s))
+		copy(sortedRedirect200s, tui.scanner.Stats.Redirect200s)
+		sort.Slice(sortedRedirect200s, func(i, j int) bool {
+			return sortedRedirect200s[i].Timestamp.Before(sortedRedirect200s[j].Timestamp)
+		})
+
+		for i, result := range sortedRedirect200s {
+			report.WriteString(fmt.Sprintf("[%d] PATH: %s\n", i+1, result.OriginalPath))
+			report.WriteString(fmt.Sprintf("    Original:    %s\n", result.OriginalURL))
+			report.WriteString(fmt.Sprintf("    Final URL:   %s\n", result.FinalURL))
+			report.WriteString(fmt.Sprintf("    Status:      %d (OK)\n", result.FinalStatus))
+			report.WriteString(fmt.Sprintf("    Size:        %s\n", formatSize(result.ContentLength)))
+			report.WriteString(fmt.Sprintf("    Hops:        %d redirect(s)\n", len(result.RedirectChain)))
+			report.WriteString(fmt.Sprintf("    Discovered:  %s\n", result.Timestamp.Format("2006-01-02 15:04:05")))
+			report.WriteString("\n")
+		}
+	}
+
+	// Detailed Findings - Redirects (non-200)
+	// Filter to only show redirects that DON'T end in 200 (those are in Redirect200s)
+	nonHitRedirects := []*ScanResult{}
+	for _, r := range tui.scanner.Stats.Redirects {
+		if r.FinalStatus != 200 {
+			nonHitRedirects = append(nonHitRedirects, r)
+		}
+	}
+	if len(nonHitRedirects) > 0 {
 		report.WriteString("┌─────────────────────────────────────────────────────────────────────────────┐\n")
 		report.WriteString("│ DETAILED FINDINGS - REDIRECTS (MEDIUM PRIORITY)                             │\n")
 		report.WriteString("└─────────────────────────────────────────────────────────────────────────────┘\n\n")
-		report.WriteString("The following paths triggered redirect chains. Review for open redirect\n")
-		report.WriteString("vulnerabilities or unexpected redirect behavior.\n\n")
+		report.WriteString("The following paths triggered redirect chains (non-200 final status).\n")
+		report.WriteString("Review for open redirect vulnerabilities or misconfigurations.\n\n")
 
-		sortedRedirects := make([]*ScanResult, len(tui.scanner.Stats.Redirects))
-		copy(sortedRedirects, tui.scanner.Stats.Redirects)
+		sortedRedirects := make([]*ScanResult, len(nonHitRedirects))
+		copy(sortedRedirects, nonHitRedirects)
 		sort.Slice(sortedRedirects, func(i, j int) bool {
 			return sortedRedirects[i].Timestamp.Before(sortedRedirects[j].Timestamp)
 		})
@@ -1885,8 +1981,8 @@ func (tui *TUI) exportExecutiveSummary() {
 
 func (tui *TUI) renderConfigMenu() {
 	// Draw semi-transparent overlay effect by drawing a box
-	menuWidth := 60
-	menuHeight := 14
+	menuWidth := 65
+	menuHeight := 18
 	menuX := (tui.width - menuWidth) / 2
 	menuY := (tui.height - menuHeight) / 2
 
@@ -1906,11 +2002,19 @@ func (tui *TUI) renderConfigMenu() {
 	textStyle := tcell.StyleDefault.Background(CurrentTheme.Background).Foreground(CurrentTheme.Text)
 	selectedStyle := tcell.StyleDefault.Background(CurrentTheme.Success).Foreground(CurrentTheme.Background).Bold(true)
 
+	// Recursive mode indicator
+	recursiveStatus := "OFF"
+	if tui.scanner.Config.Recursive {
+		recursiveStatus = "ON"
+	}
+
 	options := []string{
-		fmt.Sprintf("Concurrency:  %d", tui.scanner.Concurrency),
-		fmt.Sprintf("Rate Limit:   %d req/s  (0 = unlimited)", tui.scanner.Config.RateLimit),
-		fmt.Sprintf("Timeout:      %d seconds", int(tui.scanner.Timeout.Seconds())),
-		fmt.Sprintf("Method:       %s", tui.scanner.Config.Method),
+		fmt.Sprintf("Concurrency:     %d", tui.scanner.Concurrency),
+		fmt.Sprintf("Rate Limit:      %d req/s  (0 = unlimited)", tui.scanner.Config.RateLimit),
+		fmt.Sprintf("Timeout:         %d seconds", int(tui.scanner.Timeout.Seconds())),
+		fmt.Sprintf("Method:          %s", tui.scanner.Config.Method),
+		fmt.Sprintf("Recursive Mode:  %s  (auto-explore directories)", recursiveStatus),
+		fmt.Sprintf("Recursion Depth: %d  (max directory levels)", tui.scanner.Config.RecursionDepth),
 	}
 
 	startY := menuY + 2
@@ -2180,13 +2284,13 @@ func (tui *TUI) HandleInput() {
 				case tcell.KeyUp:
 					tui.configMenuSelected--
 					if tui.configMenuSelected < 0 {
-						tui.configMenuSelected = 3 // 4 options, so max index is 3
+						tui.configMenuSelected = 5 // 6 options, so max index is 5
 					}
 					tui.Render()
 					continue
 				case tcell.KeyDown:
 					tui.configMenuSelected++
-					if tui.configMenuSelected > 3 {
+					if tui.configMenuSelected > 5 {
 						tui.configMenuSelected = 0
 					}
 					tui.Render()
@@ -2231,6 +2335,12 @@ func (tui *TUI) HandleInput() {
 							currentIdx = len(methods) - 1
 						}
 						tui.scanner.Config.Method = methods[currentIdx]
+					case 4: // Recursive Mode (toggle)
+						tui.scanner.Config.Recursive = !tui.scanner.Config.Recursive
+					case 5: // Recursion Depth
+						if tui.scanner.Config.RecursionDepth > 1 {
+							tui.scanner.Config.RecursionDepth--
+						}
 					}
 					tui.Render()
 					continue
@@ -2268,6 +2378,13 @@ func (tui *TUI) HandleInput() {
 							currentIdx = 0
 						}
 						tui.scanner.Config.Method = methods[currentIdx]
+					case 4: // Recursive Mode (toggle)
+						tui.scanner.Config.Recursive = !tui.scanner.Config.Recursive
+					case 5: // Recursion Depth
+						tui.scanner.Config.RecursionDepth++
+						if tui.scanner.Config.RecursionDepth > 10 {
+							tui.scanner.Config.RecursionDepth = 10
+						}
 					}
 					tui.Render()
 					continue
@@ -2358,6 +2475,24 @@ func (tui *TUI) HandleInput() {
 				// Backspace - Delete last character from input
 				if tui.inputActive && len(tui.inputText) > 0 {
 					tui.inputText = tui.inputText[:len(tui.inputText)-1]
+				}
+			case tcell.KeyCtrlV:
+				// Ctrl+V - Paste from clipboard
+				if tui.inputActive {
+					clipboard := getClipboard()
+					if clipboard != "" {
+						tui.inputText += clipboard
+					}
+				}
+			case tcell.KeyCtrlA:
+				// Ctrl+A - Select all / clear input
+				if tui.inputActive {
+					tui.inputText = ""
+				}
+			case tcell.KeyCtrlU:
+				// Ctrl+U - Clear input line (Unix style)
+				if tui.inputActive {
+					tui.inputText = ""
 				}
 			case tcell.KeyRune:
 				// If input is active, add typed characters to input text
@@ -2570,6 +2705,22 @@ func (tui *TUI) submitInput() {
 		LastUpdate: time.Now(),
 	}
 	tui.scanner.lastResults = make([]*ScanResult, 0, 50)
+
+	// Reset visited paths for new scan
+	tui.scanner.pathMutex.Lock()
+	tui.scanner.visitedPaths = make(map[string]bool)
+	tui.scanner.pathMutex.Unlock()
+
+	// Drain and reset recursion queue
+	draining := true
+	for draining {
+		select {
+		case <-tui.scanner.recursionQueue:
+			// Discard old queue items
+		default:
+			draining = false
+		}
+	}
 
 	// Load wordlist - try default
 	paths, err := LoadWordlist("wordlist.txt")
@@ -2828,6 +2979,11 @@ func (s *Scanner) ScanPath(path string) (*ScanResult, error) {
 		s.Stats.Direct200s = append(s.Stats.Direct200s, result)
 		atomic.AddInt64(&s.LiveStats.Direct200s, 1)
 	} else if len(result.RedirectChain) > 0 {
+		// Check if final status is 200 (HIT via redirect - this is what gobuster/ffuf show)
+		if result.FinalStatus == 200 {
+			s.Stats.Redirect200s = append(s.Stats.Redirect200s, result)
+			atomic.AddInt64(&s.LiveStats.Redirect200s, 1)
+		}
 		s.Stats.Redirects = append(s.Stats.Redirects, result)
 		s.Stats.RedirectTargets[result.FinalURL]++
 		atomic.AddInt64(&s.LiveStats.Redirects, 1)
@@ -2847,6 +3003,18 @@ func (s *Scanner) ScanPath(path string) (*ScanResult, error) {
 	// Add to live display buffer
 	s.AddLiveResult(result)
 
+	// RECURSIVE AUTO-COMPLETE: If this looks like a valid directory, queue recursive scans
+	if s.Config.Recursive && isLikelyDirectory(path) {
+		// Queue recursive paths for: 200 OK, 301/302 redirects (often directories), 403 (might have accessible subdirs)
+		if result.FinalStatus == 200 || result.FinalStatus == 301 || result.FinalStatus == 302 || result.FinalStatus == 403 {
+			// Signal that we found a directory to explore (will be processed by ScanAll)
+			select {
+			case s.recursionQueue <- "DIR:" + path:
+			default:
+			}
+		}
+	}
+
 	return result, nil
 }
 
@@ -2860,9 +3028,94 @@ func (s *Scanner) AddLiveResult(result *ScanResult) {
 	}
 }
 
+// isLikelyDirectory checks if a path looks like a directory (no file extension)
+func isLikelyDirectory(path string) bool {
+	// Remove trailing slash for analysis
+	cleanPath := strings.TrimSuffix(path, "/")
+
+	// Get the last segment
+	parts := strings.Split(cleanPath, "/")
+	if len(parts) == 0 {
+		return true
+	}
+	lastPart := parts[len(parts)-1]
+
+	// Check if it has a file extension (contains a dot followed by 2-5 chars)
+	if strings.Contains(lastPart, ".") {
+		ext := strings.ToLower(lastPart[strings.LastIndex(lastPart, ".")+1:])
+		// Common file extensions - if it matches, it's likely a file not a directory
+		fileExts := map[string]bool{
+			"html": true, "htm": true, "php": true, "asp": true, "aspx": true,
+			"jsp": true, "js": true, "css": true, "json": true, "xml": true,
+			"txt": true, "csv": true, "pdf": true, "doc": true, "docx": true,
+			"xls": true, "xlsx": true, "png": true, "jpg": true, "jpeg": true,
+			"gif": true, "svg": true, "ico": true, "zip": true, "tar": true,
+			"gz": true, "rar": true, "7z": true, "sql": true, "bak": true,
+			"log": true, "yml": true, "yaml": true, "md": true, "py": true,
+			"rb": true, "go": true, "java": true, "class": true, "jar": true,
+			"war": true, "ear": true, "dll": true, "exe": true, "so": true,
+			"sh": true, "bat": true, "ps1": true, "env": true, "config": true,
+		}
+		if fileExts[ext] {
+			return false
+		}
+	}
+	return true
+}
+
+// QueueRecursivePaths adds new paths to scan based on a discovered directory
+func (s *Scanner) QueueRecursivePaths(basePath string, wordlist []string) int {
+	if !s.Config.Recursive {
+		return 0
+	}
+
+	// Check recursion depth
+	depth := strings.Count(basePath, "/")
+	if depth >= s.Config.RecursionDepth {
+		return 0
+	}
+
+	queued := 0
+	basePath = strings.TrimSuffix(basePath, "/")
+
+	for _, word := range wordlist {
+		newPath := basePath + "/" + strings.TrimPrefix(word, "/")
+
+		// Check if we've already visited this path
+		s.pathMutex.Lock()
+		if s.visitedPaths[newPath] {
+			s.pathMutex.Unlock()
+			continue
+		}
+		s.visitedPaths[newPath] = true
+		s.pathMutex.Unlock()
+
+		// Try to queue the path (non-blocking)
+		select {
+		case s.recursionQueue <- newPath:
+			queued++
+		default:
+			// Queue is full, skip
+		}
+	}
+
+	return queued
+}
+
 func (s *Scanner) ScanAll(paths []string, tui *TUI) []*ScanResult {
+	// Store original wordlist for recursive scanning
+	originalWordlist := make([]string, len(paths))
+	copy(originalWordlist, paths)
+
 	if len(s.Config.Extensions) > 0 {
 		paths = GeneratePathsWithExtensions(paths, s.Config.Extensions)
+	}
+
+	// Mark initial paths as visited
+	for _, p := range paths {
+		s.pathMutex.Lock()
+		s.visitedPaths[p] = true
+		s.pathMutex.Unlock()
 	}
 
 	totalPaths := len(paths)
@@ -2872,22 +3125,28 @@ func (s *Scanner) ScanAll(paths []string, tui *TUI) []*ScanResult {
 	s.WildcardBaseline = s.DetectWildcard()
 
 	// Start speed calculator
+	speedDone := make(chan bool)
 	go func() {
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
 		for {
-			<-ticker.C
-			completed := atomic.LoadInt64(&s.LiveStats.CompletedRequests)
-			elapsed := time.Since(s.LiveStats.StartTime).Seconds()
-			if elapsed > 0 {
-				s.LiveStats.mu.Lock()
-				s.LiveStats.CurrentSpeed = float64(completed) / elapsed
-				s.LiveStats.mu.Unlock()
-			}
-
-			if completed >= int64(totalPaths) {
+			select {
+			case <-speedDone:
 				return
+			case <-ticker.C:
+				completed := atomic.LoadInt64(&s.LiveStats.CompletedRequests)
+				total := atomic.LoadInt64(&s.LiveStats.TotalRequests)
+				elapsed := time.Since(s.LiveStats.StartTime).Seconds()
+				if elapsed > 0 {
+					s.LiveStats.mu.Lock()
+					s.LiveStats.CurrentSpeed = float64(completed) / elapsed
+					s.LiveStats.mu.Unlock()
+				}
+
+				if completed >= total {
+					return
+				}
 			}
 		}
 	}()
@@ -2898,6 +3157,88 @@ func (s *Scanner) ScanAll(paths []string, tui *TUI) []*ScanResult {
 
 	var results []*ScanResult
 	var resultsMutex sync.Mutex
+
+	// RECURSIVE SCANNING: Start a goroutine to process discovered directories
+	recursiveDone := make(chan bool)
+	if s.Config.Recursive {
+		go func() {
+			for {
+				select {
+				case <-recursiveDone:
+					return
+				case dirSignal := <-s.recursionQueue:
+					// Check for cancellation
+					s.cancelMutex.Lock()
+					cancelled := s.cancelScan
+					s.cancelMutex.Unlock()
+					if cancelled {
+						continue
+					}
+
+					// Process directory signal
+					if strings.HasPrefix(dirSignal, "DIR:") {
+						basePath := strings.TrimPrefix(dirSignal, "DIR:")
+
+						// Generate new paths by appending wordlist to this directory
+						newPaths := []string{}
+						for _, word := range originalWordlist {
+							newPath := strings.TrimSuffix(basePath, "/") + "/" + strings.TrimPrefix(word, "/")
+
+							// Skip if already visited
+							s.pathMutex.Lock()
+							if s.visitedPaths[newPath] {
+								s.pathMutex.Unlock()
+								continue
+							}
+							s.visitedPaths[newPath] = true
+							s.pathMutex.Unlock()
+
+							// Check depth limit
+							depth := strings.Count(newPath, "/")
+							if depth <= s.Config.RecursionDepth {
+								newPaths = append(newPaths, newPath)
+							}
+						}
+
+						// Update total and scan new paths
+						if len(newPaths) > 0 {
+							atomic.AddInt64(&s.LiveStats.TotalRequests, int64(len(newPaths)))
+
+							for _, p := range newPaths {
+								wg.Add(1)
+								go func(path string) {
+									defer wg.Done()
+									sem <- struct{}{}
+									defer func() { <-sem }()
+
+									s.cancelMutex.Lock()
+									cancelled := s.cancelScan
+									s.cancelMutex.Unlock()
+
+									if cancelled {
+										atomic.AddInt64(&s.LiveStats.CompletedRequests, 1)
+										return
+									}
+
+									result, _ := s.ScanPath(path)
+									if result != nil {
+										resultsMutex.Lock()
+										results = append(results, result)
+										resultsMutex.Unlock()
+									}
+
+									atomic.AddInt64(&s.LiveStats.CompletedRequests, 1)
+								}(p)
+							}
+						}
+					}
+				default:
+					// No directory signals, brief sleep to prevent CPU spin
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+		}()
+	}
 
 	for _, p := range paths {
 		// Check if scan has been cancelled
@@ -2939,6 +3280,23 @@ func (s *Scanner) ScanAll(paths []string, tui *TUI) []*ScanResult {
 	}
 
 	wg.Wait()
+
+	// Give recursive scanner a moment to finish any pending work
+	if s.Config.Recursive {
+		time.Sleep(200 * time.Millisecond)
+		// Drain any remaining items and wait for those to complete
+		draining := true
+		for draining {
+			select {
+			case <-s.recursionQueue:
+				// Discard remaining queue items after main scan is done
+			default:
+				draining = false
+			}
+		}
+		close(recursiveDone)
+	}
+	close(speedDone)
 
 	return results
 }

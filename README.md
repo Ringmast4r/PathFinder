@@ -1,8 +1,8 @@
-# PathFinder v1.0.1
+# PathFinder v1.1.0
 
 **Military-grade web path discovery with real-time TUI dashboard and animated pathfinding visualization.**
 
-![Version](https://img.shields.io/badge/version-1.0.1-red)
+![Version](https://img.shields.io/badge/version-1.1.0-red)
 ![Go](https://img.shields.io/badge/Go-1.16%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -38,11 +38,13 @@ Built by **ringmast4r** for professional penetration testing and security assess
 - **Animated Progress** - Visual feedback synchronized with scan completion
 
 ### Scanner Excellence
+- **Smart Hit Detection** - Counts 200 responses as HITS whether direct or via redirect (like gobuster/ffuf)
+- **Live Redirect Tracking** - See redirect destinations in real-time: `/register → register.apple.com/business/ui`
 - **Complete Redirect Chain Tracking** - See every redirect with timestamps, not just final destination
-- **Direct vs Redirected Classification** - Know what's truly accessible vs redirect tricks
+- **Recursive Directory Scanning** - Automatically discovers and scans subdirectories
 - **Wildcard Detection** - Automatic filtering of catch-all responses
 - **Content Fingerprinting** - MD5 hashing to identify duplicate pages
-- **Thread-Safe Statistics** - Atomic counters for accurate real-time metrics
+- **Clipboard Paste Support** - Ctrl+V to paste URLs directly into the scanner
 
 ### Professional Output
 - **Executive Summary Export** (F5) - Military-grade pentest reports with risk assessment
@@ -79,6 +81,9 @@ pathfinder.exe -target https://example.com
 | Key | Action |
 |-----|--------|
 | `Enter` | Activate input / Submit new target |
+| `Ctrl+V` | Paste URL from clipboard |
+| `Ctrl+A` | Select all input text |
+| `Ctrl+U` | Clear input field |
 | `F1` | Toggle help screen (industry standard) |
 | `F2` | Hide local network info (OpSec mode) |
 | `F3` | Regenerate Skittles colors |
@@ -138,9 +143,10 @@ pathfinder.exe -target https://example.com
 ## Wordlist Recommendations
 
 ### Current Wordlist
-- **Included**: 719 curated entries covering common web paths, CMS-specific routes, API endpoints
-- **Focus**: Quality over quantity, organized by category
-- **Suitable for**: Quick scans, initial reconnaissance, targeted testing
+- **Included**: 23,991 curated entries - comprehensive coverage for professional assessments
+- **Coverage**: Government paths (.gob/.gov), military (.mil), Latin American infrastructure, APIs, admin panels, CMS routes
+- **International**: Spanish/Portuguese government paths, military structures (ejercito, armada, fuerza aerea)
+- **Suitable for**: Full reconnaissance, government/military assessments, international targets
 
 ### Industry-Standard Alternatives
 
@@ -315,13 +321,13 @@ pathfinder.exe -target https://example.com -concurrency 200 -timeout 5
 
 ```
 PathFinder/
-├── main.go                    # Core application (8000+ lines)
-├── wordlist.txt               # 719 curated web paths
+├── main.go                    # Core application
+├── pathfinder.exe             # Compiled binary (Windows)
+├── wordlist.txt               # 23,991 curated web paths
 ├── build.bat                  # Cross-platform build script
 ├── SCAN.bat                   # Quick scan launcher
-├── README.md                  # This file
-├── ROADMAP.md                 # Future features
-└── TECHNICAL_NOTES.md         # Implementation details
+├── START_PATHFINDER.bat       # Interactive launcher
+└── README.md                  # This file
 ```
 
 ---
@@ -350,6 +356,11 @@ PathFinder/
 - [x] Interactive config (F4)
 - [x] Wildcard detection
 - [x] Redirect chain tracking
+- [x] Smart hit detection (200s via redirect count as hits)
+- [x] Live redirect URL display
+- [x] Recursive directory scanning
+- [x] Clipboard paste support (Ctrl+V)
+- [x] Expanded international wordlist (23,991 entries)
 
 ---
 
@@ -373,8 +384,6 @@ PathFinder/
 ## Support
 
 Found a bug? Feature request?
-- Check `ROADMAP.md` for planned features
-- Check `TECHNICAL_NOTES.md` for details
 - Open an issue on GitHub
 
 ---
